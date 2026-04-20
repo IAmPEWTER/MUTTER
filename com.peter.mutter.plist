@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.peter.mutter</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/code/Desktop/MUTTER/.venv/bin/python</string>
+        <string>-m</string>
+        <string>mutter.daemon</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/code/Desktop/MUTTER</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/mutter.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/mutter.err.log</string>
+</dict>
+</plist>

@@ -1,0 +1,5 @@
+mlx-whisper>=0.4
+sounddevice>=0.4
+numpy>=1.26
+pynput>=1.7
+pyobjc-framework-Quartz>=10

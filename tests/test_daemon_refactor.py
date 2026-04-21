@@ -112,7 +112,7 @@ def test_fn_down_up_cycle():
     # Worker thread injects and returns to IDLE
     dm.listen_thread.join(timeout=2.0)
     assert dm.state == d.STATE_IDLE
-    dm.keyboard.type.assert_called_once_with("hello world")
+    dm.keyboard.type.assert_called_once_with(" hello world")
     print("ok fn-down → fn-up cycle")
 
 

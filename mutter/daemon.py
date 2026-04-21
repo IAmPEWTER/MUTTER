@@ -336,7 +336,8 @@ class MutterDaemon:
         if not cleaned:
             return
         try:
-            self.keyboard.type(cleaned)
+            # Leading space so dictation doesn't crash into prior text.
+            self.keyboard.type(" " + cleaned)
         except Exception as e:
             print(f"mutter: inject error: {e}", file=sys.stderr)
 

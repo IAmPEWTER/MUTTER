@@ -1,5 +1,9 @@
 # MUTTER build log
 
+## 2026-04-21 — mute system audio while fn held
+
+Two `os.system("osascript -e 'set volume output muted ...' &")` lines in `_on_fn_down` / `_on_fn_up` so the mic doesn't pick up music during dictation. Fire-and-forget; prior mute state not preserved; measured overhead +9 ms/turn.
+
 ## 2026-04-19 — initial build
 
 **Decision: use pynput, not pbcopy+Cmd+V.**

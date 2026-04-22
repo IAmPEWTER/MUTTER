@@ -293,6 +293,7 @@ class MutterDaemon:
             if self.state != STATE_IDLE:
                 return
             self.state = STATE_LISTENING
+        os.system("osascript -e 'set volume output muted true' &")
         self.listen_thread = threading.Thread(
             target=self._listen_worker, daemon=True
         )
@@ -303,6 +304,7 @@ class MutterDaemon:
             if self.state != STATE_LISTENING or self.listener is None:
                 return
             self.state = STATE_TRANSCRIBING
+        os.system("osascript -e 'set volume output muted false' &")
         try:
             self.listener.finish()
         except Exception as e:

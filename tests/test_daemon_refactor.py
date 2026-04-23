@@ -93,6 +93,9 @@ class FakeListener:
     def stop(self):
         pass
 
+    def _close_stream(self):
+        pass
+
 
 def _new_daemon_with_fake_listener():
     dm = d.MutterDaemon()

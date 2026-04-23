@@ -169,7 +169,7 @@ class MutterDaemon:
             max_duration=120.0,
         )
         try:
-            listener.start()
+            listener._ensure_model()
         except RuntimeError as e:
             print(f"mutter: {e}", file=sys.stderr)
             return 1
@@ -330,6 +330,7 @@ class MutterDaemon:
         finally:
             if transcript:
                 self._inject(transcript)
+            self.listener._close_stream()
             with self._state_lock:
                 self.state = STATE_IDLE
 
@@ -357,6 +358,9 @@ class MutterDaemon:
             return 1
         try:
             self.install_signals()
+            rc = self.start_listener()
+            if rc != 0:
+                return rc
             if not self._start_event_tap():
                 print(
                     "mutter: CGEventTapCreate returned NULL — grant "
@@ -366,9 +370,6 @@ class MutterDaemon:
                     file=sys.stderr,
                 )
                 return 1
-            rc = self.start_listener()
-            if rc != 0:
-                return rc
             while not self.should_exit:
                 time.sleep(0.5)
         finally:

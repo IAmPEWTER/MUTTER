@@ -17,9 +17,18 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from mutter import daemon as d
+
+
+@pytest.fixture
+def tmp_pidfile(tmp_path, monkeypatch):
+    path = tmp_path / "mutter.pid"
+    monkeypatch.setenv("MUTTER_PIDFILE", str(path))
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +53,6 @@ def test_sanitizer():
 
 
 def test_pidfile_acquire_reject(tmp_pidfile):
-    os.environ["MUTTER_PIDFILE"] = str(tmp_pidfile)
     assert d._acquire_pidfile()
     # Simulate a different live daemon by writing our own PID back —
     # kill(pid, 0) from us to us always succeeds, so acquire must reject.
@@ -54,7 +62,6 @@ def test_pidfile_acquire_reject(tmp_pidfile):
 
 
 def test_pidfile_stale(tmp_pidfile):
-    os.environ["MUTTER_PIDFILE"] = str(tmp_pidfile)
     # Write a PID that can't exist.
     tmp_pidfile.write_text("999999")
     assert d._acquire_pidfile()
@@ -63,7 +70,6 @@ def test_pidfile_stale(tmp_pidfile):
 
 
 def test_pidfile_release(tmp_pidfile):
-    os.environ["MUTTER_PIDFILE"] = str(tmp_pidfile)
     d._acquire_pidfile()
     assert tmp_pidfile.exists()
     d._release_pidfile()

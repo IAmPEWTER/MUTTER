@@ -6,10 +6,17 @@ once), then watches the fn key via a CGEventTap.
     fn-down  → start recording
     fn-up    → finish + inject
 
-Injection uses pynput's Controller.type(), which calls the macOS
-CGEventKeyboardSetUnicodeString API. That types characters directly
-into whatever app has focus — the clipboard is never touched, so the
-user's Cmd+C / Cmd+V stays theirs. Completely silent.
+Injection: pynput's Controller.type() per character — except when
+the frontmost app is macOS Screen Sharing (com.apple.ScreenSharing),
+in which case we set the local clipboard to the dictation and fire
+Screen Sharing's own ``Edit > Send Clipboard`` menu item via the
+Accessibility API. That action is Apple's intended primitive for
+moving local-clipboard text to the remote machine; synthesizing
+Cmd+V locally doesn't work because Screen Sharing forwards Cmd+V
+to the remote, where it pastes from the *remote* clipboard. The
+daemon already holds Accessibility (for the fn-key tap), so no
+new permission prompt is needed. The user's prior clipboard is
+restored 1 s after the press.
 
 State machine (3 states)::
 
@@ -114,6 +121,125 @@ def _sanitize(text: str) -> str:
     while "  " in cleaned:
         cleaned = cleaned.replace("  ", " ")
     return cleaned.strip()
+
+
+_SCREEN_SHARING_BUNDLE_ID = "com.apple.ScreenSharing"
+
+# Restore the user's prior clipboard this many seconds after firing
+# Send Clipboard. Module-level so tests can shrink it.
+_CLIPBOARD_RESTORE_DELAY = 1.0
+
+
+def _frontmost_screen_sharing_pid():
+    """Return Screen Sharing.app's pid if it's the frontmost app, else None."""
+    try:
+        import AppKit
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    except Exception:
+        return None
+    if app is None or app.bundleIdentifier() != _SCREEN_SHARING_BUNDLE_ID:
+        return None
+    return app.processIdentifier()
+
+
+def _frontmost_is_screen_sharing() -> bool:
+    return _frontmost_screen_sharing_pid() is not None
+
+
+def _restore_clipboard(prior: str) -> None:
+    """Put ``prior`` back on the system pasteboard. Runs on a Timer
+    thread shortly after a paste; no-op-on-error since stderr would
+    just spam launchd's log on a transient AppKit hiccup."""
+    try:
+        import AppKit
+        pb = AppKit.NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(prior, AppKit.NSPasteboardTypeString)
+    except Exception:
+        pass
+
+
+def _press_send_clipboard_menu() -> bool:
+    """AXPress Screen Sharing's ``Edit > Send Clipboard``.
+
+    Returns True iff the action fired. False covers all the ways
+    this can be a no-op: Screen Sharing isn't the frontmost app
+    anymore, the menu item couldn't be located, the item is
+    currently disabled (no active session), or any AX call errored.
+    """
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateApplication,
+            AXUIElementCopyAttributeValue,
+            AXUIElementPerformAction,
+            kAXMenuBarAttribute,
+            kAXChildrenAttribute,
+            kAXTitleAttribute,
+            kAXEnabledAttribute,
+            kAXPressAction,
+        )
+    except ImportError:
+        return False
+
+    pid = _frontmost_screen_sharing_pid()
+    if pid is None:
+        return False
+
+    def attr(el, name):
+        err, val = AXUIElementCopyAttributeValue(el, name, None)
+        return val if err == 0 else None
+
+    ax_app = AXUIElementCreateApplication(pid)
+    menubar = attr(ax_app, kAXMenuBarAttribute)
+    if menubar is None:
+        return False
+
+    # menubar > top-level menu items > each wraps a single AXMenu > leaf items.
+    edit = next(
+        (m for m in (attr(menubar, kAXChildrenAttribute) or [])
+         if attr(m, kAXTitleAttribute) == "Edit"),
+        None,
+    )
+    if edit is None:
+        return False
+    edit_menu = (attr(edit, kAXChildrenAttribute) or [None])[0]
+    if edit_menu is None:
+        return False
+    send_item = next(
+        (i for i in (attr(edit_menu, kAXChildrenAttribute) or [])
+         if attr(i, kAXTitleAttribute) == "Send Clipboard"),
+        None,
+    )
+    if send_item is None:
+        return False
+    if not attr(send_item, kAXEnabledAttribute):
+        return False
+    return AXUIElementPerformAction(send_item, kAXPressAction) == 0
+
+
+def _send_via_screen_sharing(payload: str) -> bool:
+    """Set the local clipboard, fire Screen Sharing's Send Clipboard,
+    schedule a clipboard restore. Returns True iff the menu action
+    fired; on False the prior clipboard is restored synchronously."""
+    import AppKit
+    pb = AppKit.NSPasteboard.generalPasteboard()
+    utf8 = AppKit.NSPasteboardTypeString
+    prior = pb.stringForType_(utf8)
+    pb.clearContents()
+    pb.setString_forType_(payload, utf8)
+
+    if not _press_send_clipboard_menu():
+        if prior is not None:
+            _restore_clipboard(prior)
+        else:
+            pb.clearContents()
+        return False
+
+    if prior is not None:
+        threading.Timer(
+            _CLIPBOARD_RESTORE_DELAY, _restore_clipboard, args=(prior,)
+        ).start()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -338,9 +464,18 @@ class MutterDaemon:
         cleaned = _sanitize(text)
         if not cleaned:
             return
+        # Leading space so dictation doesn't crash into prior text.
+        payload = " " + cleaned
         try:
-            # Leading space so dictation doesn't crash into prior text.
-            self.keyboard.type(" " + cleaned)
+            if _frontmost_is_screen_sharing():
+                if not _send_via_screen_sharing(payload):
+                    print(
+                        "mutter: Screen Sharing focused but Send Clipboard "
+                        "unavailable (not in an active session?)",
+                        file=sys.stderr,
+                    )
+                return
+            self.keyboard.type(payload)
         except Exception as e:
             print(f"mutter: inject error: {e}", file=sys.stderr)
 

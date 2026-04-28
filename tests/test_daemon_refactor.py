@@ -10,6 +10,7 @@ Exercises:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import threading
@@ -172,6 +173,110 @@ def test_whitespace_only_transcript_no_type():
 
 
 # ---------------------------------------------------------------------------
+# Screen-Sharing paste path
+# ---------------------------------------------------------------------------
+
+
+class FakePasteboard:
+    def __init__(self, initial):
+        self.value = initial
+        self.history = [initial]
+
+    def stringForType_(self, _t):
+        return self.value
+
+    def clearContents(self):
+        self.value = None
+
+    def setString_forType_(self, v, _t):
+        self.value = v
+        self.history.append(v)
+        return True
+
+
+@contextlib.contextmanager
+def _patched_screen_sharing(*, fake_pb, press_result):
+    """Stub everything `_send_via_screen_sharing` touches: a fake
+    AppKit module exposing the given pasteboard, plus monkey-patched
+    detection + AXPress that returns ``press_result``. Also shrinks
+    the restore Timer delay so tests don't sleep a full second."""
+
+    class FakeAppKit:
+        NSPasteboardTypeString = "public.utf8-plain-text"
+
+        class NSPasteboard:
+            @staticmethod
+            def generalPasteboard():
+                return fake_pb
+
+    saved = {
+        "appkit": sys.modules.get("AppKit"),
+        "frontmost": d._frontmost_is_screen_sharing,
+        "press": d._press_send_clipboard_menu,
+        "delay": d._CLIPBOARD_RESTORE_DELAY,
+    }
+    sys.modules["AppKit"] = FakeAppKit
+    d._frontmost_is_screen_sharing = lambda: True
+    press_mock = MagicMock(return_value=press_result)
+    d._press_send_clipboard_menu = press_mock
+    d._CLIPBOARD_RESTORE_DELAY = 0.05
+    try:
+        yield press_mock
+    finally:
+        if saved["appkit"] is None:
+            sys.modules.pop("AppKit", None)
+        else:
+            sys.modules["AppKit"] = saved["appkit"]
+        d._frontmost_is_screen_sharing = saved["frontmost"]
+        d._press_send_clipboard_menu = saved["press"]
+        d._CLIPBOARD_RESTORE_DELAY = saved["delay"]
+
+
+def test_inject_types_normally_outside_screen_sharing():
+    original = d._frontmost_is_screen_sharing
+    d._frontmost_is_screen_sharing = lambda: False
+    try:
+        dm = _new_daemon_with_fake_listener()
+        dm._inject("hello world")
+        dm.keyboard.type.assert_called_once_with(" hello world")
+    finally:
+        d._frontmost_is_screen_sharing = original
+    print("ok normal app → type")
+
+
+def test_inject_screen_sharing_press_succeeds():
+    """Send Clipboard menu fires: clipboard set with dictation,
+    type-mode keyboard untouched, prior clipboard restored on Timer."""
+    fake_pb = FakePasteboard(initial="USER PRIOR")
+    with _patched_screen_sharing(fake_pb=fake_pb, press_result=True) as press:
+        dm = _new_daemon_with_fake_listener()
+        dm._inject("hello world")
+
+        press.assert_called_once_with()
+        dm.keyboard.type.assert_not_called()
+        assert " hello world" in fake_pb.history
+        # Wait past the (shrunken) restore Timer.
+        time.sleep(0.15)
+        assert fake_pb.value == "USER PRIOR"
+    print("ok screen-share inject + clipboard restored")
+
+
+def test_inject_screen_sharing_press_fails_rolls_back():
+    """If the menu can't be pressed (no session, etc.), we must not
+    leave the dictation on the user's clipboard."""
+    fake_pb = FakePasteboard(initial="USER PRIOR")
+    with _patched_screen_sharing(fake_pb=fake_pb, press_result=False):
+        dm = _new_daemon_with_fake_listener()
+        dm._inject("hello world")
+        # Type path must NOT have run either — we don't fall back to
+        # mangled per-char typing inside Screen Sharing.
+        dm.keyboard.type.assert_not_called()
+        # Clipboard was rolled back synchronously.
+        assert fake_pb.value == "USER PRIOR"
+    print("ok screen-share press failure → clipboard rolled back")
+
+
+# ---------------------------------------------------------------------------
 # Tap callback — fn-flag transition detection using fake event constants.
 #
 # We don't need a real CGEvent; we bypass _tap_callback and drive
@@ -227,6 +332,11 @@ def test_fn_transition_logic():
 def main():
     import tempfile
 
+    # Force the pre-existing state-machine tests onto the type path
+    # regardless of whichever app the developer happens to be focused
+    # on. Individual paste-mode tests override this themselves.
+    d._frontmost_is_screen_sharing = lambda: False
+
     def with_tmp(fn):
         with tempfile.TemporaryDirectory() as t:
             fn(Path(t) / "mutter.pid")
@@ -241,6 +351,9 @@ def main():
     test_empty_transcript_no_type()
     test_whitespace_only_transcript_no_type()
     test_fn_transition_logic()
+    test_inject_types_normally_outside_screen_sharing()
+    test_inject_screen_sharing_press_succeeds()
+    test_inject_screen_sharing_press_fails_rolls_back()
     print("\nall tests passed")
 
 

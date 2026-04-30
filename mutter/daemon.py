@@ -6,10 +6,13 @@ once), then watches the fn key via a CGEventTap.
     fn-down  → start recording
     fn-up    → finish + inject
 
-Injection uses pynput's Controller.type(), which calls the macOS
-CGEventKeyboardSetUnicodeString API. That types characters directly
-into whatever app has focus — the clipboard is never touched, so the
-user's Cmd+C / Cmd+V stays theirs. Completely silent.
+Injection: pynput's ``Controller.type`` in normal apps; real Quartz
+keycode events when the focused app is macOS Screen Sharing (see
+``_type_via_quartz_keycodes`` for why pynput's typer mangles chars
+across the screen-share keystroke channel).
+
+System output is muted while fn is held so music or video on this
+machine can't bleed into the mic.
 
 State machine (3 states)::
 
@@ -116,6 +119,175 @@ def _sanitize(text: str) -> str:
     return cleaned.strip()
 
 
+def _set_system_muted(muted: bool) -> None:
+    """Toggle macOS output mute via osascript, fire-and-forget.
+
+    Used to silence music/video on this machine while fn is held so
+    it can't bleed into the mic. Prior mute state isn't preserved —
+    every fn-up turns audio back on regardless. ~9 ms per call.
+    """
+    state = "true" if muted else "false"
+    os.system(f"osascript -e 'set volume output muted {state}' &")
+
+
+# 8 ms inter-keystroke delay through Screen Sharing — measured
+# floor for reliable delivery; 5 ms drops events under burst.
+_TYPE_INTER_CHAR_DELAY = 0.008
+
+# kVK_Shift. Posting an explicit shift-down before a shifted char
+# (and shift-up after) is required: just setting the shift *flag*
+# on the key event isn't enough — Screen Sharing's keystroke
+# forwarder drops the modifier and '?' arrives as '/'.
+_KEYCODE_SHIFT = 56
+
+
+# ---------------------------------------------------------------------------
+# Focused-app detection.
+#
+# AppKit's NSWorkspace.frontmostApplication / NSRunningApplication lookups
+# only update when the main run loop pumps events in a common mode — and
+# this daemon's main thread just sleeps. Their caches stay frozen at startup
+# state, so we go straight to the Accessibility API + libproc, both of which
+# are real-time and don't need a run loop.
+# ---------------------------------------------------------------------------
+
+
+def _focused_app_pid() -> Optional[int]:
+    """PID of the currently focused app, or None."""
+    try:
+        from ApplicationServices import (
+            AXUIElementCreateSystemWide,
+            AXUIElementCopyAttributeValue,
+            AXUIElementGetPid,
+        )
+    except ImportError:
+        return None
+    try:
+        err, focused = AXUIElementCopyAttributeValue(
+            AXUIElementCreateSystemWide(), "AXFocusedApplication", None
+        )
+        if err != 0 or focused is None:
+            return None
+        err, pid = AXUIElementGetPid(focused, None)
+        return int(pid) if err == 0 else None
+    except Exception:
+        return None
+
+
+def _process_executable_path(pid: int) -> Optional[str]:
+    """Resolve a pid to its executable path via libproc."""
+    try:
+        import ctypes
+        import ctypes.util
+        libproc = ctypes.CDLL(ctypes.util.find_library("proc"))
+        libproc.proc_pidpath.argtypes = [
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32
+        ]
+        libproc.proc_pidpath.restype = ctypes.c_int
+        buf = ctypes.create_string_buffer(4096)
+        n = libproc.proc_pidpath(pid, buf, 4096)
+        if n <= 0:
+            return None
+        return buf.value.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+
+def _frontmost_is_screen_sharing() -> bool:
+    pid = _focused_app_pid()
+    if pid is None:
+        return False
+    path = _process_executable_path(pid)
+    return path is not None and "Screen Sharing.app" in path
+
+
+# Common Whisper-produced non-ANSI chars normalized to ASCII so the
+# layout's keycode map can type them. Anything outside this set and
+# the keycode map is silently skipped (rare for English dictation).
+_ASCII_FALLBACK = {
+    "‘": "'", "’": "'",   # smart single quotes
+    "“": '"', "”": '"',   # smart double quotes
+    "–": "-", "—": "-",   # en-dash, em-dash
+    "…": "...",                # ellipsis
+}
+
+
+def _normalize_for_typing(text: str) -> str:
+    return "".join(_ASCII_FALLBACK.get(ch, ch) for ch in text)
+
+
+_KEYCODE_MAP: Optional[dict] = None
+
+
+def _ensure_keycode_map() -> dict:
+    """Build (and cache) a ``char -> (keycode, modifier_flag)`` map
+    for the current keyboard layout, by asking Apple's UCKeyTranslate
+    what each (keycode, modifier) combination produces. Covers a-z,
+    A-Z, 0-9, and the shifted/unshifted symbols on the layout."""
+    global _KEYCODE_MAP
+    if _KEYCODE_MAP is not None:
+        return _KEYCODE_MAP
+    from pynput._util.darwin import keycode_context, keycode_to_string
+    # UCKeyTranslate's modifier_state is the high byte of the classic
+    # EventRecord.modifiers word: shiftKey = 0x200, top byte = 2.
+    UC_NO_MOD, UC_SHIFT = 0, 2
+    m: dict = {}
+    with keycode_context() as ctx:
+        for kc in range(128):
+            for ucstate, flag in (
+                (UC_NO_MOD, 0),
+                (UC_SHIFT, Quartz.kCGEventFlagMaskShift),
+            ):
+                ch = keycode_to_string(ctx, kc, ucstate)
+                if not ch or len(ch) != 1:
+                    continue
+                # No-mod entries take priority (already inserted in outer loop).
+                m.setdefault(ch, (kc, flag))
+    _KEYCODE_MAP = m
+    return m
+
+
+def _type_via_quartz_keycodes(text: str) -> None:
+    """Type each char as a real Quartz keycode event. Brackets runs
+    of shifted chars with explicit shift-key down/up events (just
+    setting the flag isn't enough through Screen Sharing — the
+    remote drops the modifier). Reliable through Screen Sharing
+    because keycode+modifier-key events are the same channel that
+    already forwards Cmd+Tab, arrow keys, fn itself."""
+    keymap = _ensure_keycode_map()
+    src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+
+    def post(kc: int, is_down: bool, with_shift: bool = False) -> None:
+        ev = Quartz.CGEventCreateKeyboardEvent(src, kc, is_down)
+        if with_shift:
+            Quartz.CGEventSetFlags(ev, Quartz.kCGEventFlagMaskShift)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+
+    shift_held = False
+    for ch in _normalize_for_typing(text):
+        info = keymap.get(ch)
+        if info is None:
+            continue
+        kc, flag = info
+        needs_shift = bool(flag)
+
+        if needs_shift and not shift_held:
+            post(_KEYCODE_SHIFT, True)
+            shift_held = True
+            time.sleep(_TYPE_INTER_CHAR_DELAY)
+        elif not needs_shift and shift_held:
+            post(_KEYCODE_SHIFT, False)
+            shift_held = False
+            time.sleep(_TYPE_INTER_CHAR_DELAY)
+
+        post(kc, True, with_shift=shift_held)
+        post(kc, False, with_shift=shift_held)
+        time.sleep(_TYPE_INTER_CHAR_DELAY)
+
+    if shift_held:
+        post(_KEYCODE_SHIFT, False)
+
+
 # ---------------------------------------------------------------------------
 # Daemon
 # ---------------------------------------------------------------------------
@@ -169,7 +341,7 @@ class MutterDaemon:
             max_duration=120.0,
         )
         try:
-            listener._ensure_model()
+            listener.start()
         except RuntimeError as e:
             print(f"mutter: {e}", file=sys.stderr)
             return 1
@@ -293,7 +465,7 @@ class MutterDaemon:
             if self.state != STATE_IDLE:
                 return
             self.state = STATE_LISTENING
-        os.system("osascript -e 'set volume output muted true' &")
+        _set_system_muted(True)
         self.listen_thread = threading.Thread(
             target=self._listen_worker, daemon=True
         )
@@ -304,7 +476,7 @@ class MutterDaemon:
             if self.state != STATE_LISTENING or self.listener is None:
                 return
             self.state = STATE_TRANSCRIBING
-        os.system("osascript -e 'set volume output muted false' &")
+        _set_system_muted(False)
         try:
             self.listener.finish()
         except Exception as e:
@@ -330,7 +502,6 @@ class MutterDaemon:
         finally:
             if transcript:
                 self._inject(transcript)
-            self.listener._close_stream()
             with self._state_lock:
                 self.state = STATE_IDLE
 
@@ -338,9 +509,13 @@ class MutterDaemon:
         cleaned = _sanitize(text)
         if not cleaned:
             return
+        # Leading space so dictation doesn't crash into prior text.
+        payload = " " + cleaned
         try:
-            # Leading space so dictation doesn't crash into prior text.
-            self.keyboard.type(" " + cleaned)
+            if _frontmost_is_screen_sharing():
+                _type_via_quartz_keycodes(payload)
+            else:
+                self.keyboard.type(payload)
         except Exception as e:
             print(f"mutter: inject error: {e}", file=sys.stderr)
 
@@ -358,6 +533,11 @@ class MutterDaemon:
             return 1
         try:
             self.install_signals()
+            # Listener must be ready BEFORE the tap goes live: an fn
+            # press during the ~10 s whisper-load would otherwise hit
+            # _listen_worker's "assert self.listener is not None",
+            # kill the worker before its finally ran, and leave state
+            # stuck in LISTENING forever — every later press a no-op.
             rc = self.start_listener()
             if rc != 0:
                 return rc

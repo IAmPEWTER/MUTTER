@@ -80,11 +80,17 @@ CHANNELS = 1
 #: 16-bit PCM. 2 bytes per sample.
 SAMPLE_WIDTH = 2
 
-#: Whisper model tag. ``large-v3-turbo`` is ~1.5 GB, distilled from
-#: large-v3: near-large accuracy at ~6x speed. Handles accents, proper
-#: nouns, and fast speech far better than tiny/base. On M-series Metal
-#: still lands sub-second per utterance.
-DEFAULT_MODEL_SIZE = "large-v3-turbo"
+#: Whisper model tag. Override per-machine via ``MUTTER_WHISPER_MODEL``
+#: (e.g. set in the LaunchAgent's ``EnvironmentVariables`` block).
+#:
+#: Recommended values for the mlx backend:
+#:
+#: - ``large-v3-turbo``     — FP16. 1.5 GB on disk, ~1.8 GB RSS. Best
+#:   accuracy. Default.
+#: - ``large-v3-turbo-q4``  — 4-bit quant. 440 MB on disk, ~780 MB RSS,
+#:   ~4 % faster. Accuracy effectively identical on English speech.
+#:   Worth it on RAM-constrained machines.
+DEFAULT_MODEL_SIZE = os.environ.get("MUTTER_WHISPER_MODEL", "large-v3-turbo")
 
 #: Backend identifiers for the pluggable whisper dispatch. ``mlx`` is
 #: Apple-Silicon-only (and requires macOS 15+ for current mlx builds);
@@ -588,13 +594,11 @@ class Listener:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Open the audio stream and load the Whisper model. Idempotent.
+        """Load the Whisper model. Idempotent.
 
-        Call this eagerly at startup if you want to pay the model load
-        cost upfront (~1-5 seconds for tiny.en) instead of on first
-        :meth:`listen`.
+        Does NOT open the mic — :meth:`listen` opens it on entry and
+        closes it on exit, so the macOS mic indicator stays off at rest.
         """
-        self._ensure_stream()
         self._ensure_model()
 
     def stop(self) -> None:
@@ -663,6 +667,9 @@ class Listener:
                 final_vad = self._vad
                 self._frames = []
                 self._vad = None
+            # Close before whisper runs so the mic indicator is only
+            # on while the user is holding the key.
+            self._close_stream()
 
         if not frames or final_vad is None or not final_vad.has_spoken:
             return None

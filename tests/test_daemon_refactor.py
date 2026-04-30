@@ -1,11 +1,14 @@
-"""Stress tests for MUTTER daemon after the CGEventTap refactor.
+"""Stress tests for MUTTER daemon.
 
 Exercises:
     - Pidfile acquire / release / stale-detect.
-    - Sanitizer (unchanged behavior).
+    - Sanitizer.
     - Fn-state transition tracker inside _tap_callback (via fake events).
     - State machine transitions with a fake Listener and fake keyboard.
     - Re-entrancy: double fn-down ignored, fn-up in IDLE ignored.
+    - Screen-Sharing inject path uses the Quartz keycode typer
+      (not pynput's mangled per-char path).
+    - Layout-derived keycode map covers the full dictation charset.
 """
 
 from __future__ import annotations
@@ -13,7 +16,6 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -99,9 +101,6 @@ class FakeListener:
     def stop(self):
         pass
 
-    def _close_stream(self):
-        pass
-
 
 def _new_daemon_with_fake_listener():
     dm = d.MutterDaemon()
@@ -148,6 +147,35 @@ def test_fn_up_without_fn_down():
     print("ok stray fn-up is no-op")
 
 
+def test_audio_mute_brackets_fn_press():
+    """Mute(True) on fn-down, Mute(False) on fn-up. No fire on
+    re-entrant fn-down (state already LISTENING). No fire on stray
+    fn-up (state already IDLE)."""
+    saved = d._set_system_muted
+    calls: list = []
+    d._set_system_muted = lambda muted: calls.append(muted)
+    try:
+        dm = _new_daemon_with_fake_listener()
+        dm._on_fn_down()
+        assert calls == [True]
+        assert dm.listener.listen_called.wait(timeout=1.0)
+        # Re-entrant fn-down while LISTENING — must NOT re-mute.
+        dm._on_fn_down()
+        assert calls == [True]
+        dm._on_fn_up()
+        assert calls == [True, False]
+        dm.listen_thread.join(timeout=2.0)
+
+        # Stray fn-up while IDLE — must NOT unmute.
+        dm2 = _new_daemon_with_fake_listener()
+        calls.clear()
+        dm2._on_fn_up()
+        assert calls == []
+    finally:
+        d._set_system_muted = saved
+    print("ok audio mute brackets fn press")
+
+
 def test_empty_transcript_no_type():
     dm = _new_daemon_with_fake_listener()
     dm.listener.transcript = None
@@ -169,6 +197,68 @@ def test_whitespace_only_transcript_no_type():
     dm.listen_thread.join(timeout=2.0)
     dm.keyboard.type.assert_not_called()
     print("ok whitespace transcript → no type")
+
+
+# ---------------------------------------------------------------------------
+# Screen-Sharing paste path
+# ---------------------------------------------------------------------------
+
+
+def test_inject_types_normally_outside_screen_sharing():
+    original = d._frontmost_is_screen_sharing
+    d._frontmost_is_screen_sharing = lambda: False
+    try:
+        dm = _new_daemon_with_fake_listener()
+        dm._inject("hello world")
+        dm.keyboard.type.assert_called_once_with(" hello world")
+        dm.keyboard.pressed.assert_not_called()
+    finally:
+        d._frontmost_is_screen_sharing = original
+    print("ok normal app → type")
+
+
+def test_inject_screen_sharing_uses_keycode_typer():
+    """When Screen Sharing is focused, _inject must call the Quartz
+    keycode typer with the dictation (no clipboard, no Cmd+V) and
+    must not invoke pynput's mangled type() path."""
+    saved_front = d._frontmost_is_screen_sharing
+    saved_typer = d._type_via_quartz_keycodes
+    d._frontmost_is_screen_sharing = lambda: True
+    d._type_via_quartz_keycodes = MagicMock()
+    try:
+        dm = _new_daemon_with_fake_listener()
+        dm._inject("hello world")
+        d._type_via_quartz_keycodes.assert_called_once_with(" hello world")
+        dm.keyboard.type.assert_not_called()
+    finally:
+        d._frontmost_is_screen_sharing = saved_front
+        d._type_via_quartz_keycodes = saved_typer
+    print("ok screen-share → keycode typer")
+
+
+def test_keycode_map_covers_dictation_charset():
+    """The layout-derived keycode map must cover every character a
+    Whisper transcript reasonably contains: a-z, A-Z, 0-9, space,
+    common punctuation. If any of these are missing, screen-share
+    typing would silently drop them."""
+    keymap = d._ensure_keycode_map()
+    required = (
+        "abcdefghijklmnopqrstuvwxyz"
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "0123456789"
+        " .,!?'\"-_"
+    )
+    missing = [c for c in required if c not in keymap]
+    assert not missing, f"keycode map missing: {missing!r}"
+    # Sanity: capital letter must use the same keycode as its lowercase
+    # twin, with the shift flag set — that's the whole reason this fix
+    # works at all.
+    lower_kc, lower_flag = keymap["i"]
+    upper_kc, upper_flag = keymap["I"]
+    assert lower_kc == upper_kc
+    assert lower_flag == 0
+    assert upper_flag != 0
+    print("ok keycode map covers dictation charset")
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +317,23 @@ def test_fn_transition_logic():
 def main():
     import tempfile
 
+    # Force the pre-existing state-machine tests onto the type path
+    # regardless of whichever app the developer happens to be focused
+    # on. Individual paste-mode tests override this themselves.
+    d._frontmost_is_screen_sharing = lambda: False
+
     def with_tmp(fn):
         with tempfile.TemporaryDirectory() as t:
-            fn(Path(t) / "mutter.pid")
+            path = Path(t) / "mutter.pid"
+            prior = os.environ.get("MUTTER_PIDFILE")
+            os.environ["MUTTER_PIDFILE"] = str(path)
+            try:
+                fn(path)
+            finally:
+                if prior is None:
+                    os.environ.pop("MUTTER_PIDFILE", None)
+                else:
+                    os.environ["MUTTER_PIDFILE"] = prior
 
     test_sanitizer()
     with_tmp(test_pidfile_acquire_reject)
@@ -238,9 +342,13 @@ def main():
     test_fn_down_up_cycle()
     test_double_fn_down_is_noop()
     test_fn_up_without_fn_down()
+    test_audio_mute_brackets_fn_press()
     test_empty_transcript_no_type()
     test_whitespace_only_transcript_no_type()
     test_fn_transition_logic()
+    test_inject_types_normally_outside_screen_sharing()
+    test_inject_screen_sharing_uses_keycode_typer()
+    test_keycode_map_covers_dictation_charset()
     print("\nall tests passed")
 
 

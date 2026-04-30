@@ -7,13 +7,13 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/code/Desktop/MUTTER/.venv/bin/python</string>
+        <string>__PKG_DIR__/.venv/bin/python</string>
         <string>-m</string>
         <string>mutter.daemon</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/code/Desktop/MUTTER</string>
+    <string>__PKG_DIR__</string>
 
     <key>RunAtLoad</key>
     <true/>

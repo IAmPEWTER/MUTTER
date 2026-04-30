@@ -6,20 +6,40 @@ macOS Screen Sharing.app too.
 
 ## Install
 
-1. Put this folder somewhere persistent — `~/Desktop/MUTTER` is fine.
-2. Double-click **install.command**. Terminal opens, runs the installer.
-3. First launch downloads the Whisper model (~1.5 GB FP16 default) and
-   compiles — takes ~60 s.
-4. On first fn-hold, macOS prompts for **Microphone** and
-   **Accessibility**. Click Allow on both.
+**One line in Terminal** — paste, hit return, that's the whole install:
 
-Manual setup is also available — see the [legacy steps](#manual-install)
-below.
+```
+curl -fsSL https://raw.githubusercontent.com/IAmPEWTER/MUTTER/main/install.sh | bash
+```
+
+What it does for you, with **no admin password required**:
+
+1. Clones the repo to `~/Desktop/MUTTER`.
+2. Installs Python 3.11 if missing (via [`uv`](https://github.com/astral-sh/uv) — a single self-contained binary, no Homebrew, no sudo).
+3. Builds the venv, installs deps.
+4. Sets up the LaunchAgent so the daemon starts at every login.
+5. Opens System Settings to the Accessibility pane for you.
+
+Then **three clicks, once:**
+
+1. **Turn off macOS Dictation** → System Settings → Keyboard → Dictation → off.
+   (Otherwise fn fires Apple's dictation at the same time as MUTTER.)
+2. **Grant Accessibility** → toggle the python entry the installer just opened the pane for.
+3. **Allow Microphone** → click Allow on the prompt the first time you hold fn.
+
+Done. Whisper model (~1.5 GB) auto-downloads on first daemon launch (~60 s).
+
+### No-Terminal install
+
+Download the [latest source zip](https://github.com/IAmPEWTER/MUTTER/archive/refs/heads/main.zip),
+unzip to `~/Desktop/MUTTER`, then **right-click `install.command` → Open**
+(macOS asks once because the file came from the internet — click "Open"
+in the dialog). Same three clicks afterward.
 
 ## Prerequisites
 
 - macOS 15+ (Sequoia or later) on Apple Silicon (M-series).
-- `python3.11` on PATH. If missing: `brew install python@3.11`.
+- That's it. The installer fetches everything else.
 
 ## Use
 

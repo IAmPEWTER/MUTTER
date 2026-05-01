@@ -1,9 +1,9 @@
 #!/bin/bash
 # MUTTER installer. Double-click from Finder or run with: bash install.command
 #
-# Checks system requirements, sets up Python 3.11 (no admin password),
-# installs deps, registers the LaunchAgent, and walks you through the
-# permission clicks at the end.
+# Verifies the Mac, installs Python 3.11 (no admin password), sets up the
+# venv + deps, registers the LaunchAgent, then walks you through the
+# permission and Settings clicks at the end. Idempotent — safe to re-run.
 
 set -euo pipefail
 
@@ -25,12 +25,12 @@ MAC_MAJOR="${MAC_VER%%.*}"
 ARCH="$(uname -m)"
 
 if [ "$ARCH" != "arm64" ]; then
-    bail "MUTTER needs an Apple Silicon Mac (M1 or newer). This Mac is $ARCH."
+    bail "MUTTER needs a Mac with an Apple chip (M1 or newer — any Mac from late 2020 onwards). This Mac has an Intel chip ($ARCH)."
 fi
 if [ "$MAC_MAJOR" -lt 15 ]; then
-    bail "MUTTER needs macOS 15 (Sequoia) or newer. This Mac is macOS $MAC_VER."
+    bail "MUTTER needs macOS 15 (Sequoia) or newer. This Mac is on macOS $MAC_VER. Update it from System Settings → General → Software Update."
 fi
-echo "macOS $MAC_VER on $ARCH — supported."
+echo "macOS $MAC_VER on Apple Silicon — supported."
 
 # ---------------------------------------------------------------------------
 # Python 3.11
@@ -74,46 +74,77 @@ launchctl load "$PLIST_DEST"
 echo "Daemon installed and started."
 
 # ---------------------------------------------------------------------------
-# Final user steps — only what's actually needed
+# Detect Settings that need changing
 # ---------------------------------------------------------------------------
+# fn / 🌐 key behavior. 0 = Do Nothing (what we want).
+# 1 = Change Input Source. 2 = Show Emoji & Symbols. 3 = Start Dictation.
+FN_USAGE="$(defaults read com.apple.HIToolbox AppleFnUsageType 2>/dev/null || echo 0)"
+
+# Old-style Dictation toggle (one of two flags depending on macOS version).
 DICT_AUTO="$(defaults read com.apple.HIToolbox AppleDictationAutoEnable 2>/dev/null || echo 0)"
 DICT_SUPP="$(defaults read com.apple.assistant.support "Dictation Enabled" 2>/dev/null || echo 0)"
 DICT_ON=0
 [ "$DICT_AUTO" = "1" ] && DICT_ON=1
 [ "$DICT_SUPP" = "1" ] && DICT_ON=1
 
-echo ""
-echo "===================================="
-echo "  Almost done — last permission step"
-echo "===================================="
-echo ""
+NEEDS_KEYBOARD=0
+[ "$FN_USAGE" != "0" ] && NEEDS_KEYBOARD=1
+[ "$DICT_ON" = "1" ] && NEEDS_KEYBOARD=1
+
+# ---------------------------------------------------------------------------
+# Walk the user through what's left
+# ---------------------------------------------------------------------------
+cat <<'EOF'
+
+==================================================
+  Almost done — a couple of one-time clicks left
+==================================================
+
+About the "fn" key: on newer Macs it has a globe icon 🌐 printed on it
+instead of the letters "fn". Same key — bottom-left of the keyboard.
+
+EOF
 
 STEP=1
-if [ "$DICT_ON" = "1" ]; then
-    cat <<EOF
-  $STEP. Turn OFF macOS Dictation (otherwise fn fires Apple's at the same time):
-       System Settings  →  Keyboard  →  Dictation  →  toggle OFF
-EOF
-    STEP=$((STEP + 1))
+
+if [ "$NEEDS_KEYBOARD" = "1" ]; then
+    echo "  $STEP. Open System Settings → Keyboard. (We'll open it for you.)"
+    if [ "$FN_USAGE" != "0" ]; then
+        echo "       • Set \"Press 🌐 key to\" → Do Nothing"
+        echo "         (otherwise fn will pop up the emoji picker every release)"
+    fi
+    if [ "$DICT_ON" = "1" ]; then
+        echo "       • Scroll down to Dictation, toggle it OFF"
+        echo "         (otherwise fn fires Apple's dictation alongside MUTTER)"
+    fi
     echo ""
+    STEP=$((STEP + 1))
 fi
 
 cat <<EOF
-  $STEP. Grant Accessibility (so MUTTER can read your fn key).
-     The pane will OPEN AUTOMATICALLY in 5 seconds.
-     Find "python" in the list and toggle it ON. If it isn't listed,
-     click "+" and pick:
-       $PKG_DIR/.venv/bin/python
+  $STEP. Grant Accessibility (lets MUTTER read your fn / 🌐 key).
+       Find "python" in the list and toggle it ON. If it isn't listed,
+       click the "+" button and pick this file:
+         $PKG_DIR/.venv/bin/python
 
-After that, just hold fn anywhere, speak, release. Text appears.
-The Microphone prompt (one-time "Allow") shows on your first fn-hold.
+After that, just hold fn / 🌐, speak, release. Text appears at the cursor.
+The Microphone prompt (one-time "Allow") shows on your first hold.
 
-Whisper model (~1.5 GB) auto-downloads on first daemon launch.
-Watch:    tail -f /tmp/mutter.out.log
+The Whisper speech-recognition model (~1.5 GB) downloads on the daemon's
+first launch. If you'd like to watch progress:
+   tail -f /tmp/mutter.out.log
 You'll see "mutter: ready" when it's done.
 EOF
 
+# ---------------------------------------------------------------------------
+# Open the panes for them
+# ---------------------------------------------------------------------------
+echo ""
 sleep 5
+if [ "$NEEDS_KEYBOARD" = "1" ]; then
+    open "x-apple.systempreferences:com.apple.preference.keyboard" 2>/dev/null || true
+    sleep 8
+fi
 open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
 
 echo ""

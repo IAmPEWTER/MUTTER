@@ -1,57 +1,21 @@
-"""Speech-to-text for CLAWS — microphone → local Whisper.
+"""Microphone → whisper service.
 
 Captures audio from the default input device, auto-stops when the user
-falls silent (simple RMS VAD), and transcribes on-device. No API keys,
-no cloud round-trips.
-
-Two Whisper backends are supported, selectable via the
-``CLAWS_WHISPER_BACKEND`` environment variable or the ``backend=``
-constructor argument on :class:`Listener`:
-
-- ``"faster-whisper"`` *(default)* — CPU int8 via the ``faster-whisper``
-  library. Works on any Mac (Apple Silicon or Intel); ~180 ms for a 5 s
-  clip on an M1 Air tiny.en.
-- ``"mlx"`` — Apple MLX Metal GPU via ``mlx-whisper``. Apple Silicon
-  only; ~65 ms for the same clip on the same machine (≈2.9× faster).
-  Identical transcripts to faster-whisper in stress testing.
+falls silent (simple RMS VAD), and transcribes via the machine-wide
+whisper unix-socket service at ``~/.whisper-service``.
 
 Usage::
 
-    from claws.stt import Listener
+    from mutter.stt import Listener
 
-    with Listener() as ears:            # backend from env / default
-        print("Speak now...")
-        transcript = ears.listen()
-        if transcript:
-            print(f"You said: {transcript}")
+    ears = Listener()
+    ears.start()
+    transcript = ears.listen()
+    if transcript:
+        print(f"You said: {transcript}")
 
-    with Listener(backend="mlx") as ears:  # explicit
-        transcript = ears.listen()
-
-Design:
-    - Lazy imports for ``sounddevice``, ``numpy``, and the chosen whisper
-      library so this module loads (and raises readable errors) on
-      machines missing any of them. Nothing at import time blocks us
-      from unit-testing pure logic.
-    - The VAD lives in :class:`_VadState`, a pure dataclass whose
-      ``update`` takes a wall-clock time as a parameter. This makes the
-      state machine 100% deterministic in tests.
-    - :class:`Listener` plumbs audio callbacks into the VAD, records
-      frames while the VAD says "still going", then hands the int16 PCM
-      buffer to the chosen backend wrapper for transcription.
-    - Each backend wrapper (``_FasterWhisperBackend``, ``_MlxBackend``)
-      owns its library import and exposes a uniform
-      ``.transcribe(audio_f32) -> str`` method. :class:`Listener` treats
-      them interchangeably via duck-typing; adding a third backend is a
-      ~20-line class.
-    - :class:`Listener` also exposes two injection seams used by tests:
-      ``stream_factory`` (replace the real ``sd.InputStream``) and
-      ``transcribe_fn`` (replace the real Whisper call). Injections let
-      us exercise the full listen/transcribe/hallucination path with
-      zero hardware and zero model download.
-    - Whisper hallucinations (``"thank you."``, ``"thanks for watching"``,
-      etc.) are filtered out of the returned transcript. Pattern list
-      inspired by ``~/.hermes/hermes-agent/tools/voice_mode.py:533-581``.
+The VAD is a pure dataclass (:class:`_VadState`) so tests can drive
+its transitions with synthetic timestamps.
 """
 
 from __future__ import annotations
@@ -62,7 +26,9 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional
+from typing import Any, List, Optional
+
+from mutter.whisper_client import WhisperClient
 
 logger = logging.getLogger(__name__)
 
@@ -79,45 +45,6 @@ CHANNELS = 1
 
 #: 16-bit PCM. 2 bytes per sample.
 SAMPLE_WIDTH = 2
-
-#: Whisper model tag. Override per-machine via ``MUTTER_WHISPER_MODEL``
-#: (e.g. set in the LaunchAgent's ``EnvironmentVariables`` block).
-#:
-#: Recommended values for the mlx backend:
-#:
-#: - ``large-v3-turbo``     — FP16. 1.5 GB on disk, ~1.8 GB RSS. Best
-#:   accuracy. Default.
-#: - ``large-v3-turbo-q4``  — 4-bit quant. 440 MB on disk, ~780 MB RSS,
-#:   ~4 % faster. Accuracy effectively identical on English speech.
-#:   Worth it on RAM-constrained machines.
-DEFAULT_MODEL_SIZE = os.environ.get("MUTTER_WHISPER_MODEL", "large-v3-turbo")
-
-#: Backend identifiers for the pluggable whisper dispatch. ``mlx`` is
-#: Apple-Silicon-only (and requires macOS 15+ for current mlx builds);
-#: ``faster-whisper`` is the portable CPU fallback.
-BACKEND_FASTER_WHISPER = "faster-whisper"
-BACKEND_MLX = "mlx"
-DEFAULT_BACKEND = BACKEND_MLX
-
-
-def resolve_backend_from_env() -> str:
-    """Return the backend tag from ``CLAWS_WHISPER_BACKEND`` or the default.
-
-    Unknown values fall back to :data:`DEFAULT_BACKEND` with a logger
-    warning — misspellings shouldn't crash the voice loop at startup.
-    """
-    raw = os.environ.get("CLAWS_WHISPER_BACKEND", "").strip().lower()
-    if not raw:
-        return DEFAULT_BACKEND
-    if raw in (BACKEND_FASTER_WHISPER, "fw", "cpu"):
-        return BACKEND_FASTER_WHISPER
-    if raw in (BACKEND_MLX, "metal", "gpu"):
-        return BACKEND_MLX
-    logger.warning(
-        "unknown CLAWS_WHISPER_BACKEND=%r, falling back to %s",
-        raw, DEFAULT_BACKEND,
-    )
-    return DEFAULT_BACKEND
 
 #: RMS level (int16 range 0-32767) below which a frame counts as silence.
 #: Slightly louder than hermes' 200 default to reduce false positives from
@@ -212,74 +139,19 @@ def is_hallucination(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def is_available(backend: str = DEFAULT_BACKEND) -> bool:
-    """True iff the native audio + whisper stack for ``backend`` is importable.
+def is_available() -> bool:
+    """True iff the audio stack (sounddevice + numpy) is importable.
 
-    Does NOT check microphone hardware or model download state. Those
-    surface as readable :class:`RuntimeError` from :meth:`Listener.start`.
+    Does NOT check microphone hardware. Mic failures surface as
+    :class:`RuntimeError` from :meth:`Listener.start`. Service
+    reachability is :func:`whisper_client.wait_for_service`.
     """
     try:
         import sounddevice  # noqa: F401
         import numpy  # noqa: F401
     except (ImportError, OSError):
         return False
-    if backend == BACKEND_MLX:
-        try:
-            import mlx_whisper  # noqa: F401
-        except (ImportError, OSError):
-            return False
-    else:
-        try:
-            import faster_whisper  # noqa: F401
-        except (ImportError, OSError):
-            return False
     return True
-
-
-def is_model_cached(
-    model_size: str = DEFAULT_MODEL_SIZE,
-    backend: str = DEFAULT_BACKEND,
-) -> bool:
-    """Return True if the Whisper model for ``backend`` is already on disk.
-
-    Lets callers tell the user whether the next :meth:`Listener.start`
-    will be instant (~1 s) or a slow one-time download (~2–4 minutes
-    for tiny.en on a typical home connection).
-
-    Both supported backends pull from Hugging Face Hub into
-    ``~/.cache/huggingface/hub``, but under different repo names and
-    with different "done" markers:
-
-    - ``faster-whisper``: ``Systran/faster-whisper-<size>`` with a
-      ``model.bin`` weight file.
-    - ``mlx``: ``mlx-community/whisper-<size>`` with a ``weights.npz``
-      weight file (MLX's native NumPy-zip format).
-
-    The presence of a ``snapshots/`` directory containing at least one
-    snapshot with the expected weight file is the cleanest "cached and
-    usable" signal short of actually loading the model.
-    """
-    from pathlib import Path
-
-    cache_root = (
-        Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
-        / "hub"
-    )
-    if backend == BACKEND_MLX:
-        repo = f"models--mlx-community--whisper-{model_size}"
-        # mlx-community ships either weights.npz (older) or weights.safetensors
-        # (newer, e.g. large-v3-turbo). Accept either.
-        markers = ("weights.npz", "weights.safetensors")
-    else:
-        repo = f"models--Systran--faster-whisper-{model_size}"
-        markers = ("model.bin",)
-    snapshots = cache_root / repo / "snapshots"
-    if not snapshots.is_dir():
-        return False
-    for snap in snapshots.iterdir():
-        if any((snap / m).exists() for m in markers):
-            return True
-    return False
 
 
 def _compute_rms_int16(samples: Any) -> int:
@@ -383,149 +255,6 @@ class _VadState:
 
 
 # ---------------------------------------------------------------------------
-# Whisper backends (pluggable)
-#
-# Each backend wrapper owns its library import, loads the model in
-# __init__, and exposes a single ``.transcribe(audio_f32) -> str`` method.
-# Listener stores the chosen wrapper in ``self._model`` and calls that
-# method — no if-else cascades in the hot path. Adding a third backend
-# (Apple SFSpeechRecognizer, Groq API, etc) is a ~20-line new class.
-# ---------------------------------------------------------------------------
-
-
-class _FasterWhisperBackend:
-    """Reference backend: faster-whisper int8 on CPU.
-
-    Works on any Mac (Apple Silicon or Intel) as well as Linux/Windows.
-    Median ≈180 ms for a 5-second English clip on an M1 with tiny.en.
-    This is the baseline every other backend is compared against.
-    """
-
-    def __init__(
-        self,
-        model_size: str,
-        language: Optional[str],
-        beam_size: int,
-    ) -> None:
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError as e:  # pragma: no cover - env dep
-            raise RuntimeError(
-                "faster-whisper is required for the 'faster-whisper' "
-                "backend. Install: pip install faster-whisper. "
-                f"(underlying error: {e})"
-            ) from e
-        # int8 on CPU: fastest honest quantization. ~5-10x realtime for
-        # tiny.en on an M1. First use triggers a ~40 MB HF download.
-        self._model = WhisperModel(
-            model_size,
-            device="cpu",
-            compute_type="int8",
-        )
-        self._language = language
-        self._beam_size = beam_size
-
-    def transcribe(self, audio_f32: Any) -> str:
-        segments, _info = self._model.transcribe(
-            audio_f32,
-            language=self._language,
-            beam_size=self._beam_size,
-            vad_filter=False,  # our VAD already trimmed the clip
-            condition_on_previous_text=False,
-        )
-        return "".join(s.text for s in segments)
-
-
-class _MlxBackend:
-    """Apple MLX Metal-GPU backend via ``mlx-whisper``.
-
-    Apple Silicon only (requires an M-series NPU/GPU). On an M1 Air
-    with tiny.en, median transcribe latency for a 5-second English
-    clip is ≈65 ms — roughly 2.9× faster than faster-whisper on the
-    same hardware, with identical transcript accuracy in stress tests.
-
-    Model repos live at ``mlx-community/whisper-<size>-mlx`` on HF. The
-    first :meth:`transcribe` call triggers a one-time download (~40 MB
-    for tiny.en) and a model-graph compile that takes a few seconds.
-    :meth:`__init__` pre-warms the model with a zero buffer so that
-    compile cost is paid at Listener start time instead of on the
-    user's first spoken turn.
-    """
-
-    #: HF repos live under the mlx-community org. Default tag
-    #: ``large-v3-turbo`` uses the canonical repo; older ``{size}-mlx``
-    #: aliases (tiny.en-mlx etc.) still work if passed as model_size.
-    _REPO_TEMPLATE = "mlx-community/whisper-{size}"
-
-    def __init__(
-        self,
-        model_size: str,
-        language: Optional[str],
-    ) -> None:
-        try:
-            import mlx_whisper  # noqa: F401
-        except ImportError as e:  # pragma: no cover - env dep
-            raise RuntimeError(
-                "mlx-whisper is required for the 'mlx' backend. "
-                "Install: pip install mlx-whisper. "
-                f"(underlying error: {e})"
-            ) from e
-        self._mlx_whisper = mlx_whisper
-        self._repo = self._REPO_TEMPLATE.format(size=model_size)
-        self._language = language
-        # Pre-warm so the first user turn doesn't eat the model-compile
-        # cost. A 0.1-second zero buffer is enough to trigger the full
-        # load-and-compile path without transcribing anything real.
-        try:
-            import numpy as np
-            warmup = np.zeros(int(SAMPLE_RATE * 0.1), dtype=np.float32)
-            self._mlx_whisper.transcribe(
-                warmup,
-                path_or_hf_repo=self._repo,
-                language=self._language,
-                condition_on_previous_text=False,
-                verbose=None,
-            )
-        except Exception as e:  # pragma: no cover - warmup is best effort
-            logger.debug("mlx warmup failed (non-fatal): %s", e)
-
-    def transcribe(self, audio_f32: Any) -> str:
-        result = self._mlx_whisper.transcribe(
-            audio_f32,
-            path_or_hf_repo=self._repo,
-            language=self._language,
-            condition_on_previous_text=False,
-            verbose=None,
-        )
-        text = result.get("text", "") if isinstance(result, dict) else ""
-        return text or ""
-
-
-def _make_backend(
-    backend: str,
-    model_size: str,
-    language: Optional[str],
-    beam_size: int,
-) -> Any:
-    """Factory: return a backend wrapper matching ``backend``.
-
-    Split out so tests can patch it without touching :class:`Listener`
-    state. Unknown backend tags raise :class:`ValueError` — the env
-    resolver (:func:`resolve_backend_from_env`) already normalises the
-    common misspellings to valid tags.
-    """
-    if backend == BACKEND_MLX:
-        return _MlxBackend(model_size=model_size, language=language)
-    if backend == BACKEND_FASTER_WHISPER:
-        return _FasterWhisperBackend(
-            model_size=model_size,
-            language=language,
-            beam_size=beam_size,
-        )
-    raise ValueError(f"unknown whisper backend: {backend!r}")
-
-
-# ---------------------------------------------------------------------------
 # Listener
 # ---------------------------------------------------------------------------
 
@@ -543,45 +272,29 @@ class Listener:
     audio stream is a shared resource.
 
     Parameters (all optional):
-        model_size: Whisper model tag. ``tiny.en`` is default.
-        backend: ``"faster-whisper"`` or ``"mlx"``. Defaults to the
-            value of ``CLAWS_WHISPER_BACKEND`` or ``"faster-whisper"``
-            if unset. See module docstring for trade-offs.
+        model: HF repo id of the warm model the whisper service should
+            use. Must be in the service's warm cache. ``None`` =
+            service's primary.
         sample_rate: input sample rate (Hz). Whisper wants 16000.
         silence_threshold: RMS cutoff for silence detection.
         silence_duration: seconds of silence after speech = stop.
         max_duration: hard ceiling on one utterance (seconds).
         min_speech_duration: minimum speech before we count a "start".
-        language: ``"en"`` passes to Whisper for speed. None = auto-detect.
-        beam_size: Whisper beam search width (faster-whisper only).
-            1 = greedy = fast. Ignored by the mlx backend.
-
-    Test-injection parameters:
-        transcribe_fn: ``(audio_int16_ndarray) -> str``. Bypass Whisper.
-        stream_factory: ``(callback) -> stream``. Bypass sounddevice.
-        time_fn: ``() -> float``. Clock source (default ``time.monotonic``).
+        language: ``"en"`` skips ~50 ms of Whisper language detection
+            per call. ``None`` = auto-detect.
     """
 
-    model_size: str = DEFAULT_MODEL_SIZE
-    backend: str = field(default_factory=resolve_backend_from_env)
+    model: Optional[str] = field(
+        default_factory=lambda: os.environ.get("MUTTER_WHISPER_MODEL")
+    )
     sample_rate: int = SAMPLE_RATE
     silence_threshold: int = DEFAULT_SILENCE_RMS
     silence_duration: float = DEFAULT_SILENCE_STOP_SEC
     max_duration: float = DEFAULT_MAX_DURATION_SEC
     min_speech_duration: float = DEFAULT_MIN_SPEECH_SEC
     language: Optional[str] = "en"
-    beam_size: int = 1
 
-    # Test-injection seams. None in production.
-    transcribe_fn: Optional[Callable[[Any], str]] = None
-    stream_factory: Optional[Callable[[Callable], Any]] = None
-    time_fn: Callable[[], float] = field(default=time.monotonic)
-
-    # Runtime state (not part of the public API)
-    # ``_model`` holds a backend wrapper instance (``_FasterWhisperBackend``
-    # or ``_MlxBackend``), each with a uniform ``.transcribe(audio_f32)``
-    # method. ``None`` when transcribe_fn is injected (tests).
-    _model: Any = field(default=None, repr=False)
+    _client: WhisperClient = field(default_factory=WhisperClient, repr=False)
     _stream: Any = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _frames: List[Any] = field(default_factory=list, repr=False)
@@ -594,22 +307,16 @@ class Listener:
     # ------------------------------------------------------------------
 
     def start(self) -> None:
-        """Load the Whisper model. Idempotent.
-
-        Does NOT open the mic — :meth:`listen` opens it on entry and
-        closes it on exit, so the macOS mic indicator stays off at rest.
-        """
-        self._ensure_model()
+        """No-op kept for context-manager parity. The client is built
+        in :meth:`__post_init__`; the mic stream is opened by :meth:`listen`."""
 
     def stop(self) -> None:
-        """Close the audio stream and drop the model. Idempotent."""
+        """Close the audio stream. Idempotent."""
         with self._lock:
             self._recording = False
             self._frames = []
             self._vad = None
         self._close_stream()
-        # Don't forcibly free the model — Python GC will.
-        self._model = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -637,7 +344,6 @@ class Listener:
         md_dur = max_duration if max_duration is not None else self.max_duration
 
         self._ensure_stream()
-        self._ensure_model()
 
         with self._lock:
             self._frames = []
@@ -647,7 +353,7 @@ class Listener:
                 silence_duration=sd_dur,
                 max_duration=md_dur,
             )
-            vad.begin(self.time_fn())
+            vad.begin(time.monotonic())
             self._vad = vad
             self._recording = True
             self._current_rms = 0
@@ -679,7 +385,7 @@ class Listener:
         except ImportError:
             return None
 
-        audio = np.concatenate(frames, axis=0)
+        audio = np.concatenate(frames, axis=0).reshape(-1)
         if audio.size < int(self.sample_rate * MIN_CAPTURED_SEC):
             return None
 
@@ -690,13 +396,6 @@ class Listener:
         if is_hallucination(text):
             return None
         return text
-
-    def cancel(self) -> None:
-        """Abort current recording without transcribing. Idempotent."""
-        with self._lock:
-            self._recording = False
-            self._frames = []
-            self._vad = None
 
     def finish(self) -> None:
         """Stop recording NOW and transcribe what we have.
@@ -723,35 +422,12 @@ class Listener:
                 self._vad.finished = True
             self._recording = False
 
-    def current_rms(self) -> int:
-        """Last-known RMS reading. Useful for live level meters."""
-        with self._lock:
-            return self._current_rms
-
-    def is_recording(self) -> bool:
-        with self._lock:
-            return self._recording
-
-    # ------------------------------------------------------------------
-    # Context manager
-    # ------------------------------------------------------------------
-
-    def __enter__(self) -> "Listener":
-        self.start()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        self.stop()
-
     # ------------------------------------------------------------------
     # Audio stream
     # ------------------------------------------------------------------
 
     def _ensure_stream(self) -> None:
         if self._stream is not None:
-            return
-        if self.stream_factory is not None:
-            self._stream = self.stream_factory(self._audio_callback)
             return
         try:
             import sounddevice as sd
@@ -810,44 +486,20 @@ class Listener:
                 self._frames.append(indata)
             rms = _compute_rms_int16(indata)
             self._current_rms = rms
-            if self._vad.update(rms, self.time_fn()):
+            if self._vad.update(rms, time.monotonic()):
                 self._recording = False
 
     # ------------------------------------------------------------------
     # Whisper
     # ------------------------------------------------------------------
 
-    def _ensure_model(self) -> None:
-        """Lazy-load the chosen backend. No-op once loaded.
-
-        Skipped entirely when ``transcribe_fn`` is injected (tests) —
-        the injection seam takes precedence over any real backend.
-        """
-        if self._model is not None or self.transcribe_fn is not None:
-            return
-        self._model = _make_backend(
-            backend=self.backend,
-            model_size=self.model_size,
-            language=self.language,
-            beam_size=self.beam_size,
-        )
-
     def _do_transcribe(self, audio_int16: Any) -> str:
-        """Run the backend wrapper against a captured clip.
-
-        ``transcribe_fn`` still takes int16 audio (backward compat with
-        existing tests and injected fakes). The real backend path
-        converts to float32 in [-1, 1] before dispatching.
-        """
-        if self.transcribe_fn is not None:
-            result = self.transcribe_fn(audio_int16)
-            return result or ""
-        if self._model is None:
-            return ""
-        try:
-            import numpy as np
-        except ImportError:
-            return ""
-        # Both real backends expect mono float32 in [-1, 1].
-        audio_f32 = (audio_int16.astype(np.float32) / 32768.0).flatten()
-        return self._model.transcribe(audio_f32) or ""
+        """Transcribe a captured int16 clip via the whisper service."""
+        result = self._client.transcribe(
+            audio_int16,
+            sample_rate=SAMPLE_RATE,
+            language=self.language,
+            model=self.model,
+            condition_on_previous_text=False,
+        )
+        return result.get("text", "") or ""

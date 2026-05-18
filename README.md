@@ -4,6 +4,11 @@ Hold the **fn** (or **🌐**) key on your Mac, speak, release — your
 words appear typed at the cursor. Whisper speech-recognition running
 on your Mac, not in the cloud. Works through Screen Sharing.
 
+> **STT runs in the whisper service** (`~/.whisper-service`, separate
+> LaunchAgent). MUTTER's venv no longer carries whisper deps; the
+> daemon talks to the service over a unix socket and the model is
+> warm-loaded once machine-wide.
+
 ## Will this work on my Mac?
 
 You need:
@@ -74,17 +79,13 @@ bash ~/Desktop/MUTTER/uninstall.command
 
 ## For tinkerers: switching the Whisper model
 
-Default is `large-v3-turbo` (1.5 GB FP16 — best accuracy). For
-RAM-tight machines, swap to the 4-bit quantised version (440 MB,
-indistinguishable on English speech) by editing
-`~/Library/LaunchAgents/com.peter.mutter.plist` and adding:
+The model is owned by the whisper service, not MUTTER. Edit the
+primary-model env var in the service's plist at
+`~/.whisper-service/` (look for the `*_WHISPER_MODEL` key — value is
+a full HF repo id like `mlx-community/whisper-large-v3-turbo-q4`),
+then reload that plist. MUTTER picks up whatever the service has
+warm.
 
-```xml
-<key>EnvironmentVariables</key>
-<dict>
-    <key>MUTTER_WHISPER_MODEL</key>
-    <string>large-v3-turbo-q4</string>
-</dict>
-```
-
-Then unload + load the plist (or reboot).
+To pin MUTTER to a specific warm model regardless of the service
+primary, set `MUTTER_WHISPER_MODEL` (also a full HF repo id) in
+MUTTER's plist. Must be one the service has loaded.

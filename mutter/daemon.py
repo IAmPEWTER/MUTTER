@@ -32,12 +32,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from mutter.stt import (
-    Listener,
-    is_available,
-    is_model_cached,
-    resolve_backend_from_env,
-)
+from mutter.stt import Listener, is_available
+from mutter.whisper_client import WhisperClient, wait_for_service
 
 try:
     from pynput.keyboard import Controller as KeyboardController
@@ -316,40 +312,30 @@ class MutterDaemon:
     # ------------------------------------------------------------------
 
     def start_listener(self) -> int:
-        backend = resolve_backend_from_env()
-        if not is_available(backend=backend):
-            lib = "mlx-whisper" if backend == "mlx" else "faster-whisper"
+        if not is_available():
             print(
-                f"mutter: deps missing (sounddevice, numpy, {lib})",
+                "mutter: audio deps missing (sounddevice, numpy)",
                 file=sys.stderr,
             )
             return 1
 
-        cached = is_model_cached(backend=backend)
-        if cached:
-            print(f"mutter: loading whisper ({backend})...", flush=True)
-        else:
-            print(
-                f"mutter: downloading whisper ({backend}, ~1.5 GB, one time)...",
-                flush=True,
-            )
+        try:
+            WhisperClient(timeout=2.0).ping()
+        except Exception:
+            print("mutter: waiting for whisper service (up to 180 s)...", flush=True)
+            if not wait_for_service(timeout=180.0):
+                print(
+                    "mutter: whisper service unreachable. Is ~/.whisper-service "
+                    "loaded? Try: launchctl list | grep whisper",
+                    file=sys.stderr,
+                )
+                return 1
 
-        t0 = time.monotonic()
-        listener = Listener(
-            backend=backend,
+        self.listener = Listener(
             silence_duration=3600.0,  # never VAD-stop; finish() gates the turn
             max_duration=120.0,
         )
-        try:
-            listener.start()
-        except RuntimeError as e:
-            print(f"mutter: {e}", file=sys.stderr)
-            return 1
-        self.listener = listener
-        print(
-            f"mutter: ready in {time.monotonic() - t0:.1f}s  pid={os.getpid()}",
-            flush=True,
-        )
+        print(f"mutter: ready  pid={os.getpid()}", flush=True)
         return 0
 
     def shutdown(self) -> None:

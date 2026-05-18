@@ -45,8 +45,9 @@ One persistent Python process. At boot:
   its own `CFRunLoop`. Returns `False` (and the daemon exits 1) if
   Accessibility isn't granted — `launchctl` then restarts us until
   the user grants it once.
-- `Listener.start()` loads mlx-whisper and pre-warms the model with a
-  zero buffer (the warmup lives inside `_MlxBackend.__init__`).
+- `WhisperClient.ping()` confirms the whisper service is up; if it's
+  not (e.g. cold boot, service still loading its model), the daemon
+  blocks in `wait_for_service(timeout=180)` before proceeding.
 - Installs `SIGTERM` / `SIGINT` handlers for clean `launchctl unload`.
 - Acquires `/tmp/mutter.pid` (single-instance lock).
 - Main thread idles on `time.sleep(0.5)` forever.
@@ -84,16 +85,21 @@ input flood), the callback receives `kCGEventTapDisabledByTimeout` /
 
 ### 2. mutter/stt.py
 
-Copied verbatim from CLAWS (`Code/claws/claws/stt.py`). Zero changes.
-Reused, not forked. Contains:
-- `Listener` — mic → whisper pipeline with `listen()`, `finish()`,
-  `cancel()`.
-- `_VadState` — pure time-parameterised VAD.
-- `_MlxBackend`, `_FasterWhisperBackend` — pluggable whisper wrappers.
+Mic → VAD → whisper-service IPC. Contains:
+- `Listener` — `listen()` records frames into a buffer until VAD or
+  `finish()` stops it, then hands the int16 PCM to `WhisperClient.transcribe()`.
+- `_VadState` — pure time-parameterised VAD. With `silence_duration`
+  set very high (3600 s) the daemon never relies on auto-stop; `finish()`
+  on fn-release is what ends the turn.
 - `is_hallucination()` — filters "thank you", "subscribe", "you", etc.
 - `MIN_CAPTURED_SEC` — drops clips shorter than 0.3 s.
-- `is_model_cached()` — for readable "downloading..." vs "loading..."
-  startup messages.
+
+### 2b. mutter/whisper_client.py
+
+Thin Python client for the whisper-service unix socket. Wraps the
+length-prefixed-JSON wire protocol. `transcribe(pcm)` is the only
+hot-path method mutter calls; `wait_for_service()` is called once at
+daemon startup.
 
 ### 3. Injection — pynput
 
@@ -124,11 +130,14 @@ CLI prompt by containing a stray newline.
 | callback → worker thread starts listening | ~5 ms | thread spawn + one lock acquire |
 | **Total fn-down → mic hot** | **~10 ms** | imperceptible |
 | fn-up → finish() | ~5 ms | same path, reversed |
-| Whisper transcribe (short clip) | ~100–300 ms | mlx Metal on M-series |
+| Whisper transcribe (short clip) | ~100–300 ms | over unix socket to the warm whisper service |
+| Unix-socket round-trip overhead | ~1 ms | length-prefixed JSON + raw PCM |
 | pynput types 40-char sentence | ~20–80 ms | one CGEvent per char |
 | **Total fn-up → text appears** | **~150–400 ms** | feels instant |
 
-Cold start (login): ~10 s mlx load. Paid once per login, not per press.
+The whisper model is loaded by the separate whisper service, not by mutter.
+Mutter's only boot cost is starting the CGEventTap (~1 s), then pinging
+the service (~few ms if it's up; up to 180 s wait if it's still warming).
 
 ## Edge cases handled
 
@@ -174,12 +183,12 @@ Cold start (login): ~10 s mlx load. Paid once per login, not per press.
 ```
 MUTTER/
 ├── SDD.md                       — this file
-├── NOTES.md                     — build log + decisions
 ├── README.md                    — setup instructions for the user
 ├── mutter/
 │   ├── __init__.py
-│   ├── stt.py                   — verbatim copy from CLAWS
-│   └── daemon.py                — CGEventTap + state machine + inject
+│   ├── daemon.py                — CGEventTap + state machine + inject
+│   ├── stt.py                   — mic + VAD + hallucination filter
+│   └── whisper_client.py        — unix-socket client for the whisper service
 ├── tests/
 │   └── test_daemon_refactor.py  — pidfile, state machine, fn transitions
 ├── com.peter.mutter.plist       — LaunchAgent for login autostart

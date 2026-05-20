@@ -3,6 +3,17 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Auto-fetch the sherpa-onnx AAR (~55 MB) into app/libs/ on first build.
+// Idempotent — skips if the file is already present with the right SHA-256.
+val fetchSherpaOnnx by tasks.registering(Exec::class) {
+    val script = file("${rootDir}/scripts/fetch-libs.sh")
+    val aar = file("${projectDir}/libs/sherpa-onnx-1.13.2.aar")
+    inputs.file(script)
+    outputs.file(aar)
+    commandLine("bash", script.absolutePath)
+}
+tasks.named("preBuild").configure { dependsOn(fetchSherpaOnnx) }
+
 android {
     namespace = "com.peter.mutter"
     compileSdk = 35

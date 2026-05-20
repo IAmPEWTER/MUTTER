@@ -100,7 +100,7 @@ cd android/
 ./gradlew :app:lintDebug              # static analysis (warnings only)
 ```
 
-The sherpa-onnx Android AAR (`app/libs/sherpa-onnx-1.13.2.aar`, ~55 MB) is committed to the repo so a fresh clone builds without manual asset downloads.
+The sherpa-onnx Android AAR (~55 MB) is **not** committed to the repo. The first `./gradlew assembleDebug` runs `scripts/fetch-libs.sh` automatically, which downloads it from `k2-fsa/sherpa-onnx` releases into `app/libs/` and SHA-256-verifies. Idempotent — subsequent builds skip the download.
 
 Debug build is signed automatically with `~/.android/debug.keystore`. Sideloadable as-is; no Play Store, no keystore management.
 

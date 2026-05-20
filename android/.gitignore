@@ -1,0 +1,13 @@
+# Gradle / Android build outputs
+build/
+.gradle/
+*.iml
+local.properties
+.idea/
+captures/
+
+# Crash logs
+hs_err_pid*
+
+# Native lib build
+.cxx/

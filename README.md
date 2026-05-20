@@ -8,6 +8,9 @@ on your Mac, not in the cloud. Works through Screen Sharing.
 > LaunchAgent). MUTTER's venv no longer carries whisper deps; the
 > daemon talks to the service over a unix socket and the model is
 > warm-loaded once machine-wide.
+>
+> **Android port:** hold **volume-down** in any text field on Android.
+> Prebuilt APK + setup: [android/README.md](android/README.md).
 
 ## Will this work on my Mac?
 

@@ -16,13 +16,12 @@ class TextInjector(private val context: Context) {
     fun inject(node: AccessibilityNodeInfo?, text: String): Boolean {
         if (text.isEmpty()) return false
         val target = node ?: run {
-            Log.w(tag, "no focused node")
+            Log.w(tag, "no target node")
             return false
         }
-        if (!target.isEditable) {
-            Log.w(tag, "focused node not editable")
-            return false
-        }
+        // No isEditable gate: custom editors (Samsung Notes, rich-text
+        // canvases) often accept ACTION_PASTE without exposing the
+        // editable flag through AX. Let the node decide via its return.
         return pasteAndRestore(target, text)
     }
 

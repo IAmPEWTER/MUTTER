@@ -16,7 +16,7 @@ That's the one most people want. Source build instructions are at the bottom for
 
 - Sideload-only. No Play Store.
 - Galaxy S23 / Snapdragon 8 Gen 2 verified. minSdk 34 (Android 14+). Built for arm64-v8a.
-- Volume-down PTT inside editable text fields. Outside, volume keys behave normally.
+- Volume-down PTT whenever the soft keyboard is up (or an editable text field has focus). Outside, volume keys behave normally.
 - Paste-and-restore text injection (universal). Password fields skipped automatically.
 
 ## One-time setup on the phone

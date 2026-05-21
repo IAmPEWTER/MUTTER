@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
@@ -102,13 +103,35 @@ class MutterAccessibilityService : AccessibilityService() {
     }
 
     private fun handleDown(): Boolean {
-        val focused = findFocusedEditable() ?: return false
+        // Password guard runs first: never record while a password field
+        // has focus, regardless of keyboard visibility.
+        val focused = try {
+            findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        } catch (t: Throwable) {
+            Log.d(tag, "findFocus failed", t); null
+        }
+        if (focused != null && isPasswordField(focused)) {
+            Log.i(tag, "handleDown drop: password field focused")
+            return false
+        }
+
+        val editable = focused?.takeIf { it.isEditable }
+        val imeUp = isImeUp()
+        // IME-up gate covers editors (Samsung Notes, rich-text canvases)
+        // whose surface doesn't expose isEditable via AX but still raise
+        // the soft keyboard.
+        if (editable == null && !imeUp) {
+            Log.d(tag, "handleDown drop: no editable + ime down")
+            return false
+        }
+        Log.i(tag, "handleDown accept: editable=${editable != null} imeUp=$imeUp")
+
         synchronized(stateLock) {
             if (state.get() != MutterState.IDLE) return true // swallow stray
             state.set(MutterState.LISTENING)
         }
         lockedDownTime = System.currentTimeMillis()
-        lastInputNode = focused
+        lastInputNode = editable  // may be null; transcribeAndInject falls back via findPasteTarget
         softCapWarned = false
         val ok = startRecording()
         if (!ok) {
@@ -188,7 +211,7 @@ class MutterAccessibilityService : AccessibilityService() {
         }
         val clean = Sanitizer.sanitize(raw)
         if (clean.isEmpty()) return
-        val node = findFocusedEditable() ?: lastInputNode
+        val node = findFocusedEditable() ?: lastInputNode ?: findPasteTarget()
         val injected = injector.inject(node, clean)
         if (!injected) {
             Log.w(tag, "injection failed; text on clipboard")
@@ -204,16 +227,53 @@ class MutterAccessibilityService : AccessibilityService() {
             null
         } ?: return null
         if (!node.isEditable) return null
-        // Privacy: skip password fields.
-        val itype = node.inputType
-        val variation = itype and InputType.TYPE_MASK_VARIATION
-        val isPassword =
-            variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
-            variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
-            variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
-            variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
-        if (isPassword) return null
+        if (isPasswordField(node)) return null
         return node
+    }
+
+    private fun isPasswordField(node: AccessibilityNodeInfo): Boolean {
+        val variation = node.inputType and InputType.TYPE_MASK_VARIATION
+        return variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
+                variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
+                variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
+    }
+
+    private fun isImeUp(): Boolean = try {
+        windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+    } catch (t: Throwable) {
+        Log.d(tag, "windows lookup failed", t)
+        false
+    }
+
+    // Fallback target lookup for apps whose editor doesn't surface as
+    // isEditable in the AX tree (Samsung Notes, custom rich-text canvases).
+    // Walks active window roots and picks the first node whose action list
+    // contains ACTION_PASTE.
+    private fun findPasteTarget(): AccessibilityNodeInfo? {
+        val roots = try {
+            windows.mapNotNull { it.root }
+        } catch (t: Throwable) {
+            Log.d(tag, "windows.root failed", t)
+            return null
+        }
+        for (root in roots) {
+            val hit = findNodeWithPasteAction(root)
+            if (hit != null) return hit
+        }
+        return null
+    }
+
+    private fun findNodeWithPasteAction(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (node.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_PASTE.id }) {
+            return node
+        }
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val hit = findNodeWithPasteAction(child)
+            if (hit != null) return hit
+        }
+        return null
     }
 
     private fun promoteToForeground() {

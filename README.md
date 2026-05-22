@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="MUTTER" width="180" />
+</p>
+
 # MUTTER
 
 Hold the **fn** (or **🌐**) key on your Mac, speak, release — your

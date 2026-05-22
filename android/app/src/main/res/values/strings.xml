@@ -39,7 +39,7 @@
     <string name="settings_intercept_enabled">Volume-down intercept</string>
     <string name="settings_intercept_enabled_desc">When off, volume-down behaves normally everywhere.</string>
     <string name="settings_about">About</string>
-    <string name="settings_about_desc">MUTTER 0.2.0 · model: distil-small.en INT8 · CPU only</string>
+    <string name="settings_about_desc">MUTTER 0.3.0 · model: distil-small.en INT8 · CPU only</string>
 
     <string name="settings_updates">Updates</string>
     <string name="settings_updates_desc">Checks GitHub Releases for a newer build.</string>

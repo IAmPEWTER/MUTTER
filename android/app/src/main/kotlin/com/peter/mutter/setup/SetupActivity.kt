@@ -85,6 +85,18 @@ class SetupActivity : AppCompatActivity() {
             }
         }
 
+        findViewById<Button>(R.id.btn_restricted).setOnClickListener {
+            // Lands on this app's App-info page; user taps ⋮ → "Allow
+            // restricted settings". No public intent for the toggle itself
+            // (Android 13+ deliberately requires the menu action).
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            try { startActivity(intent) } catch (_: Throwable) {
+                startActivity(Intent(Settings.ACTION_SETTINGS))
+            }
+        }
+
         btnAccessibility.setOnClickListener {
             try {
                 startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))

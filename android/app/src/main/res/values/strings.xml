@@ -14,13 +14,16 @@
     <string name="setup_title">MUTTER setup</string>
     <string name="setup_step_mic">1. Microphone access</string>
     <string name="setup_step_mic_desc">Allow MUTTER to record audio. Audio is processed on-device and never leaves the phone.</string>
-    <string name="setup_step_accessibility">2. Enable accessibility service</string>
+    <string name="setup_step_restricted">2. Allow restricted settings</string>
+    <string name="setup_step_restricted_desc">Android 13+ blocks sideloaded apps from toggling accessibility until you unblock them. Tap below to open MUTTER\'s app info, then tap the ⋮ menu (top-right) → Allow restricted settings. Then come back here.</string>
+    <string name="action_open_app_info">Open app info</string>
+    <string name="setup_step_accessibility">3. Enable accessibility service</string>
     <string name="setup_step_accessibility_desc">Required to detect volume-down inside text fields and inject text. Tap to open Android Settings.</string>
-    <string name="setup_step_battery">3. Battery optimization exemption</string>
+    <string name="setup_step_battery">4. Battery optimization exemption</string>
     <string name="setup_step_battery_desc">Prevents Android from killing the service in the background.</string>
-    <string name="setup_step_model">4. Download speech model</string>
+    <string name="setup_step_model">5. Download speech model</string>
     <string name="setup_step_model_desc">~300 MB. One-time download. Cached on device.</string>
-    <string name="setup_step_test">5. Test it</string>
+    <string name="setup_step_test">6. Test it</string>
     <string name="setup_step_test_desc">Hold volume-down here and say something. Release to transcribe.</string>
 
     <string name="action_grant">Grant</string>

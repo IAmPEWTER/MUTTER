@@ -61,7 +61,34 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- Step 2: Accessibility -->
+        <!-- Step 2: Restricted settings (Android 13+ accessibility gate) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingVertical="8dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/setup_step_restricted"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/setup_step_restricted_desc"
+                android:textSize="14sp"
+                android:paddingTop="4dp" />
+            <Button
+                android:id="@+id/btn_restricted"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/action_open_app_info" />
+        </LinearLayout>
+
+        <!-- Step 3: Accessibility -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -99,7 +126,7 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- Step 3: Battery -->
+        <!-- Step 4: Battery -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -137,7 +164,7 @@
             </LinearLayout>
         </LinearLayout>
 
-        <!-- Step 4: Model download -->
+        <!-- Step 5: Model download -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -189,7 +216,7 @@
                 android:paddingTop="4dp" />
         </LinearLayout>
 
-        <!-- Step 5: Test field -->
+        <!-- Step 6: Test field -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

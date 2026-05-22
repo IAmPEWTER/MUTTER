@@ -23,6 +23,8 @@ import com.peter.mutter.ModelDownloader
 import com.peter.mutter.MutterAccessibilityService
 import com.peter.mutter.R
 import com.peter.mutter.settings.SettingsActivity
+import com.peter.mutter.updater.UpdateCheckResult
+import com.peter.mutter.updater.UpdateChecker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,9 +69,11 @@ class SetupActivity : AppCompatActivity() {
         modelDetail = findViewById(R.id.model_detail)
         testField = findViewById(R.id.test_field)
 
-        findViewById<Button>(R.id.btn_settings).setOnClickListener {
+        val btnSettings = findViewById<Button>(R.id.btn_settings)
+        btnSettings.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        kickOffSilentUpdateCheck(btnSettings)
 
         btnMic.setOnClickListener {
             requestMic.launch(Manifest.permission.RECORD_AUDIO)
@@ -143,6 +147,18 @@ class SetupActivity : AppCompatActivity() {
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
         ) ?: return false
         return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
+    }
+
+    private fun kickOffSilentUpdateCheck(settingsBtn: Button) {
+        lifecycleScope.launch {
+            val result = UpdateChecker(this@SetupActivity).check(force = false)
+            if (result is UpdateCheckResult.Available) {
+                withContext(Dispatchers.Main) {
+                    settingsBtn.text = getString(R.string.action_settings) +
+                        " · update " + result.manifest.versionName
+                }
+            }
+        }
     }
 
     private fun startDownload() {

@@ -8,6 +8,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
 
@@ -34,6 +35,10 @@
             android:exported="false"
             android:label="@string/settings_title"
             android:parentActivityName=".setup.SetupActivity" />
+
+        <receiver
+            android:name=".updater.UpdateInstallReceiver"
+            android:exported="false" />
 
         <service
             android:name=".MutterAccessibilityService"

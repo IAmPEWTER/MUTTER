@@ -8,9 +8,17 @@ Local Whisper (sherpa-onnx, distil-small.en INT8). CPU only. Clipboard restored 
 
 Prebuilt debug APK (45 MB, anyone with the link can download):
 
-**https://drive.google.com/file/d/13oiCOU95ENVV6AQ6Pu_7tzvlnZ7AYaqD/view**
+**https://github.com/IAmPEWTER/mutter-releases/releases/latest/download/app-debug.apk**
 
-That's the one most people want. Source build instructions are at the bottom for anyone who wants to compile from scratch.
+(Old Drive mirror: https://drive.google.com/file/d/13oiCOU95ENVV6AQ6Pu_7tzvlnZ7AYaqD/view — kept for the first install if you can't reach GitHub.)
+
+Source build instructions are at the bottom for anyone who wants to compile from scratch.
+
+## In-app updates
+
+From v0.2.0 the app self-updates. On launch it fetches `latest.json` from the releases repo, compares `versionCode`, and offers an in-app install if higher. The model cache and prefs survive updates (same package + same signing key). See `docs/release-process.md` for the cut-a-release procedure.
+
+First-time setup: Settings → tap Check for updates → Install. Android will once ask "Install unknown apps for MUTTER" — toggle on, return, tap Install again. After that all updates run with a single confirm tap per install.
 
 ## What works out of the box
 

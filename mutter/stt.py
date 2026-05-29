@@ -458,7 +458,10 @@ class Listener:
         stream, self._stream = self._stream, None
         if stream is None:
             return
-        for op in ("stop", "close"):
+        # abort, not stop: Pa_StopStream drains the input buffer and can
+        # deadlock after CoreAudio HAL disruption (sleep/wake, device
+        # change). Frames are already callback-copied; nothing to drain.
+        for op in ("abort", "close"):
             fn = getattr(stream, op, None)
             if fn is None:
                 continue

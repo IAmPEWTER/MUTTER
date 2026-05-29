@@ -59,6 +59,12 @@ STATE_IDLE = "idle"
 STATE_LISTENING = "listening"
 STATE_TRANSCRIBING = "transcribing"
 
+# Hard ceiling on one turn (capture + transcribe + inject): 120 s
+# capture cap from listen() + 60 s grace for transcribe and slow
+# Screen-Sharing injection. Overrun = wedged audio worker (PortAudio
+# teardown deadlock); main loop os._exit(1)s for launchd to respawn.
+_TURN_DEADLINE_SEC = 180.0
+
 
 # ---------------------------------------------------------------------------
 # Pidfile — single-instance lock.
@@ -299,6 +305,7 @@ class MutterDaemon:
         self._state_lock = threading.Lock()
         self.listen_thread: Optional[threading.Thread] = None
         self.should_exit = False
+        self._turn_deadline: Optional[float] = None
 
         # Event-tap state. All touched on the tap's CFRunLoop thread.
         self._tap = None
@@ -452,6 +459,7 @@ class MutterDaemon:
                 return
             self.state = STATE_LISTENING
         _set_system_muted(True)
+        self._turn_deadline = time.monotonic() + _TURN_DEADLINE_SEC
         self.listen_thread = threading.Thread(
             target=self._listen_worker, daemon=True
         )
@@ -490,6 +498,7 @@ class MutterDaemon:
                 self._inject(transcript)
             with self._state_lock:
                 self.state = STATE_IDLE
+            self._turn_deadline = None
 
     def _inject(self, text: str) -> None:
         cleaned = _sanitize(text)
@@ -537,6 +546,17 @@ class MutterDaemon:
                 )
                 return 1
             while not self.should_exit:
+                deadline = self._turn_deadline
+                if deadline is not None and time.monotonic() > deadline:
+                    # Wedged worker — clean shutdown would hang on the
+                    # same mutex. Die hard; launchd respawns.
+                    print(
+                        "mutter: turn deadline exceeded; exiting for "
+                        "launchd to respawn",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    os._exit(1)
                 time.sleep(0.5)
         finally:
             self._stop_event_tap()

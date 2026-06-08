@@ -20,6 +20,10 @@ class ModelDownloader(private val context: Context) {
         val expectedSize: Long,
     )
 
+    companion object {
+        const val VAD_MODEL = "silero_vad.onnx"
+    }
+
     private val assets = listOf(
         Asset(
             url = "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-distil-small.en/resolve/main/distil-small.en-encoder.int8.onnx",
@@ -36,6 +40,11 @@ class ModelDownloader(private val context: Context) {
             filename = WhisperEngine.TOKENS,
             expectedSize = 835_554L,
         ),
+        Asset(
+            url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+            filename = VAD_MODEL,
+            expectedSize = 643_854L,
+        ),
     )
 
     fun modelDir(): File {
@@ -43,6 +52,8 @@ class ModelDownloader(private val context: Context) {
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
+
+    fun vadModelPath(): String = File(modelDir(), VAD_MODEL).absolutePath
 
     fun isPresent(): Boolean {
         val dir = modelDir()

@@ -8,18 +8,22 @@ import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
+/**
+ * Captures the mic in fixed [windowSize]-sample windows and hands each one to
+ * [onWindow] on the capture thread. No length cap — a hold can run as long as
+ * the user talks; segmentation downstream keeps Whisper-sized chunks. VAD is
+ * ~1000x faster than realtime, so running it inside [onWindow] never starves
+ * the read loop.
+ */
 class AudioRecorder(
-    private val sampleRate: Int = 16000,
-    private val blockMs: Int = 50,
-    private val maxSeconds: Int = 60,
+    private val sampleRate: Int = 16_000,
+    private val windowSize: Int = 512,
+    private val onWindow: (FloatArray) -> Unit,
 ) {
     private val tag = "MutterAudio"
     private val running = AtomicBoolean(false)
     private var record: AudioRecord? = null
     private var worker: Thread? = null
-    private val collected = ArrayList<FloatArray>()
-    private var capturedSamples = 0
-    private val capacityCap = sampleRate * maxSeconds
 
     @SuppressLint("MissingPermission")
     fun start(): Boolean {
@@ -33,8 +37,8 @@ class AudioRecorder(
             Log.e(tag, "AudioRecord.getMinBufferSize returned $minBuf")
             return false
         }
-        val blockSamples = sampleRate * blockMs / 1000
-        val bufSize = maxOf(minBuf, blockSamples * 4)
+        // Headroom so brief per-window work can't overrun the OS capture buffer.
+        val bufSize = maxOf(minBuf, windowSize * 2 * 8)
 
         val rec = try {
             AudioRecord(
@@ -53,10 +57,6 @@ class AudioRecorder(
             rec.release()
             return false
         }
-        synchronized(collected) {
-            collected.clear()
-            capturedSamples = 0
-        }
         try {
             rec.startRecording()
         } catch (t: Throwable) {
@@ -68,39 +68,33 @@ class AudioRecorder(
         running.set(true)
 
         worker = thread(name = "MutterAudioWorker", isDaemon = true) {
-            val shortBuf = ShortArray(blockSamples)
+            val shortBuf = ShortArray(windowSize)
             while (running.get()) {
                 val read = try {
-                    rec.read(shortBuf, 0, shortBuf.size)
+                    rec.read(shortBuf, 0, windowSize)
                 } catch (t: Throwable) {
                     Log.e(tag, "read failed", t)
                     break
                 }
                 if (read <= 0) {
-                    // ERROR_INVALID_OPERATION / ERROR_BAD_VALUE — quit loop.
-                    if (read < 0) break
+                    if (read < 0) break // ERROR_INVALID_OPERATION / ERROR_BAD_VALUE
                     continue
                 }
                 val floats = FloatArray(read)
                 for (i in 0 until read) floats[i] = shortBuf[i] / 32768f
-                synchronized(collected) {
-                    if (capturedSamples + read <= capacityCap) {
-                        collected.add(floats)
-                        capturedSamples += read
-                    } else {
-                        running.set(false)
-                    }
+                try {
+                    onWindow(floats)
+                } catch (t: Throwable) {
+                    Log.e(tag, "onWindow handler threw", t)
                 }
             }
         }
         return true
     }
 
-    fun stop(): FloatArray {
-        if (!running.compareAndSet(true, false)) {
-            // already stopped; still try to return whatever was captured
-        }
-        worker?.join(500)
+    fun stop() {
+        running.set(false)
+        worker?.join(1_000)
         worker = null
         val rec = record
         record = null
@@ -108,26 +102,5 @@ class AudioRecorder(
             try { rec.stop() } catch (_: Throwable) {}
             try { rec.release() } catch (_: Throwable) {}
         }
-        return concat()
-    }
-
-    fun isRecording(): Boolean = running.get()
-
-    fun capturedSeconds(): Float = synchronized(collected) {
-        capturedSamples.toFloat() / sampleRate
-    }
-
-    private fun concat(): FloatArray = synchronized(collected) {
-        val total = capturedSamples
-        if (total == 0) return@synchronized FloatArray(0)
-        val out = FloatArray(total)
-        var pos = 0
-        for (chunk in collected) {
-            System.arraycopy(chunk, 0, out, pos, chunk.size)
-            pos += chunk.size
-        }
-        collected.clear()
-        capturedSamples = 0
-        out
     }
 }

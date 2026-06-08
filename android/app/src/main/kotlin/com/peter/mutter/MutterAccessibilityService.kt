@@ -1,6 +1,10 @@
 package com.peter.mutter
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -11,6 +15,7 @@ import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
+import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicReference
 
@@ -22,6 +27,7 @@ class MutterAccessibilityService : AccessibilityService() {
 
     private var recorder: AudioRecorder? = null
     private lateinit var engine: WhisperEngine
+    private lateinit var segmenter: VadSegmenter
     private lateinit var downloader: ModelDownloader
     private lateinit var injector: TextInjector
     private val worker = Executors.newSingleThreadExecutor { r ->
@@ -30,18 +36,22 @@ class MutterAccessibilityService : AccessibilityService() {
     private val modelExec = Executors.newSingleThreadExecutor { r ->
         Thread(r, "MutterModelLoad").apply { isDaemon = true }
     }
-    @Volatile private var lockedDownTime: Long = 0L
     @Volatile private var lastInputNode: AccessibilityNodeInfo? = null
-    @Volatile private var softCapWarned: Boolean = false
-    private var softCapFuture: java.util.concurrent.ScheduledFuture<*>? = null
-    private val scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor { r ->
-        Thread(r, "MutterScheduler").apply { isDaemon = true }
-    }
+    // True once any chunk of the current hold has been injected — drives the
+    // single separating space between streamed chunks. Touched only on `worker`.
+    @Volatile private var injectedThisHold: Boolean = false
+    private var recycleReceiver: BroadcastReceiver? = null
 
     override fun onCreate() {
         super.onCreate()
         downloader = ModelDownloader(this)
         engine = WhisperEngine(downloader.modelDir())
+        // Each completed chunk is queued to the single-thread worker, so chunks
+        // transcribe and inject strictly in spoken order while capture continues.
+        segmenter = VadSegmenter(
+            modelPath = downloader.vadModelPath(),
+            onChunk = { chunk -> worker.execute { transcribeAndInject(chunk) } },
+        )
         injector = TextInjector(this)
         NotificationHelper.ensureChannel(this)
     }
@@ -52,28 +62,34 @@ class MutterAccessibilityService : AccessibilityService() {
         modelExec.execute {
             if (downloader.isPresent()) {
                 val ok = engine.load()
-                Log.i(tag, "model load: $ok")
+                val vadOk = segmenter.load()
+                Log.i(tag, "model load: $ok, vad load: $vadOk")
             } else {
                 Log.w(tag, "model not present — user must run setup")
             }
         }
+        registerRecycleReceiver()
+        DailyRecycler.arm(this)
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         Log.i(tag, "service unbinding")
         try { recorder?.stop() } catch (_: Throwable) {}
         recorder = null
+        segmenter.release()
         engine.release()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         try { recorder?.stop() } catch (_: Throwable) {}
-        softCapFuture?.cancel(false)
+        recycleReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) {} }
+        recycleReceiver = null
+        DailyRecycler.disarm(this)
+        segmenter.release()
         engine.release()
         worker.shutdownNow()
         modelExec.shutdownNow()
-        scheduler.shutdownNow()
         super.onDestroy()
     }
 
@@ -130,9 +146,9 @@ class MutterAccessibilityService : AccessibilityService() {
             if (state.get() != MutterState.IDLE) return true // swallow stray
             state.set(MutterState.LISTENING)
         }
-        lockedDownTime = System.currentTimeMillis()
         lastInputNode = editable  // may be null; transcribeAndInject falls back via findPasteTarget
-        softCapWarned = false
+        injectedThisHold = false
+        segmenter.reset()
         val ok = startRecording()
         if (!ok) {
             synchronized(stateLock) { state.set(MutterState.IDLE) }
@@ -140,12 +156,6 @@ class MutterAccessibilityService : AccessibilityService() {
             return false
         }
         promoteToForeground()
-        softCapFuture = scheduler.schedule({
-            if (state.get() == MutterState.LISTENING) {
-                softCapWarned = true
-                haptic(40)
-            }
-        }, SOFT_CAP_SEC.toLong(), java.util.concurrent.TimeUnit.SECONDS)
         return true
     }
 
@@ -154,42 +164,34 @@ class MutterAccessibilityService : AccessibilityService() {
             if (state.get() != MutterState.LISTENING) return false
             state.set(MutterState.TRANSCRIBING)
         }
-        softCapFuture?.cancel(false)
-        softCapFuture = null
         val rec = recorder
         recorder = null
-        val samples = try {
-            rec?.stop() ?: FloatArray(0)
-        } catch (t: Throwable) {
-            Log.e(tag, "stop failed", t)
-            FloatArray(0)
-        }
+        // stop() joins the capture thread, so every cut chunk has already been
+        // queued. flush() then queues the final partial chunk; both land on the
+        // FIFO worker ahead of the completion marker below.
+        try { rec?.stop() } catch (t: Throwable) { Log.e(tag, "stop failed", t) }
+        segmenter.flush()
         demoteForeground()
 
         worker.execute {
-            try {
-                transcribeAndInject(samples)
-            } finally {
-                synchronized(stateLock) { state.set(MutterState.IDLE) }
-            }
+            synchronized(stateLock) { state.set(MutterState.IDLE) }
         }
         return true
     }
 
     private fun startRecording(): Boolean {
-        val r = AudioRecorder(sampleRate = 16000, blockMs = 50, maxSeconds = 60)
+        val r = AudioRecorder(onWindow = { window -> segmenter.feed(window) })
         val ok = r.start()
         if (ok) recorder = r
         return ok
     }
 
+    // One streamed chunk: transcribe and inject in spoken order. Runs on the
+    // single `worker` thread, so injectedThisHold is race-free and the
+    // separating space between chunks is added exactly once.
     private fun transcribeAndInject(samples: FloatArray) {
-        if (samples.size < 16000 * MIN_CAPTURED_SEC) {
-            Log.i(tag, "clip too short (${samples.size} samples), dropping")
-            return
-        }
         if (EnergyGate.isSilent(samples, 16000)) {
-            Log.i(tag, "energy gate dropped silent clip")
+            Log.i(tag, "energy gate dropped silent chunk")
             return
         }
         if (!engine.isLoaded()) {
@@ -211,9 +213,12 @@ class MutterAccessibilityService : AccessibilityService() {
         }
         val clean = Sanitizer.sanitize(raw)
         if (clean.isEmpty()) return
+        val text = if (injectedThisHold) " $clean" else clean
         val node = findFocusedEditable() ?: lastInputNode ?: findPasteTarget()
-        val injected = injector.inject(node, clean)
-        if (!injected) {
+        val injected = injector.inject(node, text)
+        if (injected) {
+            injectedThisHold = true
+        } else {
             Log.w(tag, "injection failed; text on clipboard")
             haptic(80)
         }
@@ -302,7 +307,46 @@ class MutterAccessibilityService : AccessibilityService() {
         }
         try { recorder?.stop() } catch (_: Throwable) {}
         recorder = null
+        segmenter.reset() // drop the in-flight hold's buffered audio
         demoteForeground()
+    }
+
+    private fun registerRecycleReceiver() {
+        if (recycleReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == DailyRecycler.ACTION) recycleEngine()
+            }
+        }
+        // RECEIVER_NOT_EXPORTED is mandatory on API 34+; the alarm broadcast is
+        // self-targeted (setPackage), so it still reaches us.
+        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            IntentFilter(DailyRecycler.ACTION),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        recycleReceiver = receiver
+    }
+
+    // Daily ~5am: tear down and rebuild the native recognizer to bound heap
+    // growth, then re-warm. Runs on modelExec so it serializes with the initial
+    // load (no races), and only when idle so it can never interrupt a live
+    // dictation. If a transcription starts mid-reload, transcribeAndInject's
+    // own isLoaded() check reloads on demand — so worst case is a brief delay,
+    // never lost audio.
+    private fun recycleEngine() {
+        modelExec.execute {
+            if (state.get() != MutterState.IDLE) {
+                Log.i(tag, "daily recycle skipped — not idle")
+                return@execute
+            }
+            if (!downloader.isPresent()) return@execute
+            Log.i(tag, "daily recycle: release + reload recognizer")
+            engine.release()
+            val ok = engine.load()
+            Log.i(tag, "daily recycle reload: $ok")
+        }
     }
 
     private fun haptic(ms: Long) {
@@ -310,10 +354,5 @@ class MutterAccessibilityService : AccessibilityService() {
         val vibrator: Vibrator? =
             (getSystemService(VIBRATOR_MANAGER_SERVICE) as? VibratorManager)?.defaultVibrator
         vibrator?.vibrate(effect)
-    }
-
-    companion object {
-        private const val MIN_CAPTURED_SEC = 0.3f
-        private const val SOFT_CAP_SEC = 30
     }
 }

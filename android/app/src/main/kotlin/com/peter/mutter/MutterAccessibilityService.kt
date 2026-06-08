@@ -156,6 +156,7 @@ class MutterAccessibilityService : AccessibilityService() {
             return false
         }
         promoteToForeground()
+        injector.begin() // capture clipboard once for the whole hold
         return true
     }
 
@@ -174,6 +175,7 @@ class MutterAccessibilityService : AccessibilityService() {
         demoteForeground()
 
         worker.execute {
+            injector.finish() // restore clipboard once, after the last chunk pasted
             synchronized(stateLock) { state.set(MutterState.IDLE) }
         }
         return true
@@ -308,6 +310,7 @@ class MutterAccessibilityService : AccessibilityService() {
         try { recorder?.stop() } catch (_: Throwable) {}
         recorder = null
         segmenter.reset() // drop the in-flight hold's buffered audio
+        injector.finish() // restore clipboard if a hold was aborted
         demoteForeground()
     }
 

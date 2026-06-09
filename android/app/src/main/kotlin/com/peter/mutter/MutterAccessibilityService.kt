@@ -38,7 +38,8 @@ class MutterAccessibilityService : AccessibilityService() {
     }
     @Volatile private var lastInputNode: AccessibilityNodeInfo? = null
     // True once any chunk of the current hold has been injected — drives the
-    // single separating space between streamed chunks. Touched only on `worker`.
+    // single separating space between streamed chunks. Reset on the input thread
+    // at hold start, read/set on `worker`; @Volatile carries the reset across.
     @Volatile private var injectedThisHold: Boolean = false
     private var recycleReceiver: BroadcastReceiver? = null
 

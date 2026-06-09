@@ -16,16 +16,8 @@ package com.peter.mutter
  * chunk grows, so we hold out for a clear pause early and accept a quick breath
  * late, keeping chunks responsive without ballooning.
  */
-class AdaptiveEndpointer(
-    private val windowMs: Int = 32, // 512 samples @ 16 kHz
-    private val minSpeechMs: Int = 4_000,
-    private val rampMidMs: Int = 7_000,
-    private val rampFloorMs: Int = 15_000,
-    private val silenceEarlyMs: Int = 500,
-    private val silenceMidMs: Int = 300,
-    private val silenceFloorMs: Int = 200,
-    private val emergencyMs: Int = 25_000,
-) {
+class AdaptiveEndpointer(private val windowMs: Int = 32) { // 512 samples @ 16 kHz
+
     private var chunkMs = 0
     private var speechMs = 0
     private var silenceRunMs = 0
@@ -39,16 +31,16 @@ class AdaptiveEndpointer(
         } else {
             silenceRunMs += windowMs
         }
-        val cut = chunkMs >= emergencyMs ||
-            (speechMs >= minSpeechMs && silenceRunMs >= requiredSilenceMs())
+        val cut = chunkMs >= EMERGENCY_MS ||
+            (speechMs >= MIN_SPEECH_MS && silenceRunMs >= requiredSilenceMs())
         if (cut) reset()
         return cut
     }
 
     private fun requiredSilenceMs(): Int = when {
-        chunkMs < rampMidMs -> silenceEarlyMs
-        chunkMs < rampFloorMs -> silenceMidMs
-        else -> silenceFloorMs
+        chunkMs < RAMP_MID_MS -> SILENCE_EARLY_MS
+        chunkMs < RAMP_FLOOR_MS -> SILENCE_MID_MS
+        else -> SILENCE_FLOOR_MS
     }
 
     /** Reset all counters — call at the start of each new hold. */
@@ -56,5 +48,15 @@ class AdaptiveEndpointer(
         chunkMs = 0
         speechMs = 0
         silenceRunMs = 0
+    }
+
+    private companion object {
+        const val MIN_SPEECH_MS = 4_000      // no cut until this much speech
+        const val RAMP_MID_MS = 7_000        // below → 500 ms gap, below RAMP_FLOOR → 300 ms
+        const val RAMP_FLOOR_MS = 15_000     // at/above → 200 ms floor
+        const val SILENCE_EARLY_MS = 500
+        const val SILENCE_MID_MS = 300
+        const val SILENCE_FLOOR_MS = 200
+        const val EMERGENCY_MS = 25_000      // unconditional cut — keeps chunks < Whisper's 30 s
     }
 }

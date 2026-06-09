@@ -30,7 +30,6 @@ class VadSegmenter(
     private var vad: Vad? = null
     private val endpointer = AdaptiveEndpointer(windowMs = windowSize * 1000 / sampleRate)
     private val buffer = ArrayList<FloatArray>()
-    private var chunkSamples = 0
     private var chunkHasSpeech = false
 
     @Synchronized
@@ -80,7 +79,6 @@ class VadSegmenter(
             true
         }
         buffer.add(window)
-        chunkSamples += window.size
         if (isSpeech) chunkHasSpeech = true
         if (endpointer.feed(isSpeech)) emitChunk()
     }
@@ -96,7 +94,6 @@ class VadSegmenter(
     @Synchronized
     fun reset() {
         buffer.clear()
-        chunkSamples = 0
         chunkHasSpeech = false
         endpointer.reset()
         try { vad?.reset() } catch (_: Throwable) {}
@@ -107,13 +104,12 @@ class VadSegmenter(
         try { vad?.release() } catch (_: Throwable) {}
         vad = null
         buffer.clear()
-        chunkSamples = 0
         chunkHasSpeech = false
     }
 
     private fun emitChunk() {
-        if (chunkHasSpeech && chunkSamples > 0) {
-            val out = FloatArray(chunkSamples)
+        if (chunkHasSpeech && buffer.isNotEmpty()) {
+            val out = FloatArray(buffer.sumOf { it.size })
             var pos = 0
             for (w in buffer) {
                 System.arraycopy(w, 0, out, pos, w.size)
@@ -122,7 +118,6 @@ class VadSegmenter(
             onChunk(out)
         }
         buffer.clear()
-        chunkSamples = 0
         chunkHasSpeech = false
     }
 }

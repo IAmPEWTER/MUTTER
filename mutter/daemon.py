@@ -122,43 +122,70 @@ def _sanitize(text: str) -> str:
     return cleaned.strip()
 
 
-# Flag file written when MUTTER mutes, deleted when it unmutes.
-# Lets a post-crash restart detect and recover a stuck-muted state.
-_MUTTER_MUTED_FLAG = Path("/tmp/mutter.muted")
+# Ownership flag. Exists on disk IFF MUTTER muted the system for a turn
+# and still owes the matching unmute. This is the SINGLE, durable source
+# of truth for "MUTTER muted the system" — claimed before muting, released
+# after unmuting. Any death (crash, kill, watchdog _exit, power loss)
+# leaves the flag iff audio is muted-by-MUTTER, so the next startup's
+# _restore_after_turn() reverts it. The user's own mute is never touched,
+# because ownership is only ever claimed on a real unmuted→muted flip.
+_MUTE_OWNED = Path("/tmp/mutter.owns-mute")
 
 
-def _get_system_muted() -> bool:
-    """Return current macOS output mute state. Returns False on error."""
+def _osascript(expr: str) -> str:
+    """Run one AppleScript expression synchronously; return stdout (or "")."""
     try:
         r = subprocess.run(
-            ["osascript", "-e", "output muted of (get volume settings)"],
+            ["osascript", "-e", expr],
             capture_output=True, text=True, timeout=2.0,
         )
-        return r.stdout.strip() == "true"
+        return r.stdout.strip()
     except Exception:
-        return False
+        return ""
 
 
-def _set_system_muted(muted: bool) -> None:
-    """Toggle macOS output mute synchronously (~9 ms).
+def _system_muted() -> bool:
+    """Current macOS output mute state. False on error."""
+    return _osascript("output muted of (get volume settings)") == "true"
 
-    Synchronous so caller order is respected — the async-with-& approach
-    allowed a rapid fn-tap to land the mute *after* the unmute, leaving
-    audio stuck muted until the next fn cycle.
+
+def _apply_mute(muted: bool) -> None:
+    """Set macOS output mute synchronously (~9 ms). Synchronous so call
+    order is respected — the old async ``osascript &`` let a fast fn-tap
+    land the mute after the unmute, sticking audio muted."""
+    _osascript(f"set volume output muted {'true' if muted else 'false'}")
+
+
+def _mute_for_turn() -> None:
+    """Mute output for a dictation turn and record that MUTTER owns it.
+
+    No-op if output is already muted — that is the user's choice, so we
+    neither re-mute nor claim ownership, and the paired
+    :func:`_restore_after_turn` leaves their mute untouched.
+
+    Ownership is claimed on disk BEFORE muting: a crash in the gap leaves
+    the flag with audio still unmuted; startup recovery then unmutes an
+    already-unmuted output (harmless) and clears the flag.
     """
-    state = "true" if muted else "false"
+    if _system_muted():
+        return
     try:
-        subprocess.run(
-            ["osascript", "-e", f"set volume output muted {state}"],
-            capture_output=True, timeout=2.0,
-        )
-    except Exception:
+        _MUTE_OWNED.touch()
+    except OSError:
         pass
+    _apply_mute(True)
+
+
+def _restore_after_turn() -> None:
+    """Undo a MUTTER-owned mute. Idempotent; safe from any exit path
+    (fn-up, shutdown, post-crash startup, watchdog). Does nothing unless
+    the ownership flag is present, so the user's own mute is never
+    clobbered."""
+    if not _MUTE_OWNED.exists():
+        return
+    _apply_mute(False)
     try:
-        if muted:
-            _MUTTER_MUTED_FLAG.touch()
-        else:
-            _MUTTER_MUTED_FLAG.unlink(missing_ok=True)
+        _MUTE_OWNED.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -344,7 +371,6 @@ class MutterDaemon:
         self._tap_loop = None
         self._tap_thread: Optional[threading.Thread] = None
         self._fn_was_on = False
-        self._was_muted: bool = False  # mute state captured on fn-down
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -378,7 +404,7 @@ class MutterDaemon:
         return 0
 
     def shutdown(self) -> None:
-        _set_system_muted(False)
+        _restore_after_turn()
         if self.listener is not None:
             try:
                 self.listener.stop()
@@ -491,9 +517,7 @@ class MutterDaemon:
             if self.state != STATE_IDLE:
                 return
             self.state = STATE_LISTENING
-        self._was_muted = _get_system_muted()
-        if not self._was_muted:
-            _set_system_muted(True)
+        _mute_for_turn()
         self._turn_deadline = time.monotonic() + _TURN_DEADLINE_SEC
         self.listen_thread = threading.Thread(
             target=self._listen_worker, daemon=True
@@ -505,8 +529,7 @@ class MutterDaemon:
             if self.state != STATE_LISTENING or self.listener is None:
                 return
             self.state = STATE_TRANSCRIBING
-        if not self._was_muted:
-            _set_system_muted(False)
+        _restore_after_turn()
         try:
             self.listener.finish()
         except Exception as e:
@@ -569,9 +592,9 @@ class MutterDaemon:
             # _listen_worker's "assert self.listener is not None",
             # kill the worker before its finally ran, and leave state
             # stuck in LISTENING forever — every later press a no-op.
-            # Recover from a previous crash that left audio muted.
-            if _MUTTER_MUTED_FLAG.exists():
-                _set_system_muted(False)
+            # Recover a mute left behind by a previous crash. Restores
+            # only if MUTTER owned the mute; never touches the user's.
+            _restore_after_turn()
             rc = self.start_listener()
             if rc != 0:
                 return rc
@@ -595,7 +618,7 @@ class MutterDaemon:
                         file=sys.stderr,
                         flush=True,
                     )
-                    _set_system_muted(False)
+                    _restore_after_turn()
                     os._exit(1)
                 time.sleep(0.5)
         finally:

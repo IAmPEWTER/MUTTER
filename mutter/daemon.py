@@ -620,6 +620,15 @@ class MutterDaemon:
                     )
                     _restore_after_turn()
                     os._exit(1)
+                # Self-heal: when not in a dictation turn, MUTTER must
+                # never be holding a mute. If the ownership flag lingers
+                # while IDLE (a missed fn-up, a wedged turn, external
+                # churn), clear it. Bounds any stuck/inverted mute to
+                # <0.5 s — the system cannot stay muted-by-MUTTER at rest.
+                with self._state_lock:
+                    idle = self.state == STATE_IDLE
+                if idle and _MUTE_OWNED.exists():
+                    _restore_after_turn()
                 time.sleep(0.5)
         finally:
             self._stop_event_tap()

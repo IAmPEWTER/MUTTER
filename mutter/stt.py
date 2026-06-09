@@ -1,6 +1,7 @@
 """Microphone → whisper service.
 
-Captures audio from the default input device, auto-stops when the user
+Captures audio from the built-in microphone (never the system-default
+input — see :func:`_builtin_input_device`), auto-stops when the user
 falls silent (simple RMS VAD), and transcribes via the machine-wide
 whisper unix-socket service at ``~/.whisper-service``.
 
@@ -23,6 +24,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -31,6 +33,32 @@ from typing import Any, List, Optional
 from mutter.whisper_client import WhisperClient
 
 logger = logging.getLogger(__name__)
+
+
+def _builtin_input_device() -> Optional[int]:
+    """Index of the Mac's built-in microphone, or ``None`` for the default.
+
+    MUTTER records from the built-in mic, never the system-default input.
+    When a Bluetooth headset/speaker is the default input, opening it forces
+    an A2DP->HFP profile switch that fails with CoreAudio ``-10851`` while
+    audio is playing, and otherwise hands back a silent (rms=0) HFP stream —
+    either way dictation gets nothing. The built-in mic has neither failure
+    mode and leaves Bluetooth music playing in A2DP untouched; the
+    output-mute-while-fn path already stops local bleed into it.
+
+    Returns ``None`` (PortAudio default) on Macs with no built-in mic.
+    """
+    try:
+        import sounddevice as sd
+        hints = ("MacBook", "iMac", "Mac mini", "Mac Studio", "Mac Pro", "Built-in")
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0:
+                name = d.get("name", "")
+                if "Microphone" in name and any(h in name for h in hints):
+                    return i
+    except Exception:
+        return None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +329,7 @@ class Listener:
     _recording: bool = field(default=False, repr=False)
     _vad: Optional[_VadState] = field(default=None, repr=False)
     _current_rms: int = field(default=0, repr=False)
+    _logged_device: Any = field(default="?", repr=False)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -437,11 +466,13 @@ class Listener:
                 "Install: pip install sounddevice numpy. "
                 f"(underlying error: {e})"
             ) from e
+        device = _builtin_input_device()
         try:
             stream = sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=CHANNELS,
                 dtype="int16",
+                device=device,
                 callback=self._audio_callback,
                 blocksize=int(self.sample_rate * DEFAULT_BLOCK_SECONDS),
             )
@@ -453,6 +484,17 @@ class Listener:
                 f"& Security → Microphone. (underlying error: {e})"
             ) from e
         self._stream = stream
+        # Log the input device once, and again only if it changes (e.g. the
+        # built-in mic disappears and we fall through to default) — keeps the
+        # error log free of one line per dictation.
+        if device != self._logged_device:
+            self._logged_device = device
+            try:
+                dev_name = sd.query_devices(device)["name"] if device is not None \
+                    else "system default"
+            except Exception:
+                dev_name = repr(device)
+            print(f"mutter: mic open on {dev_name!r}", file=sys.stderr, flush=True)
 
     def _close_stream(self) -> None:
         stream, self._stream = self._stream, None

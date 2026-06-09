@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -121,15 +122,45 @@ def _sanitize(text: str) -> str:
     return cleaned.strip()
 
 
-def _set_system_muted(muted: bool) -> None:
-    """Toggle macOS output mute via osascript, fire-and-forget.
+# Flag file written when MUTTER mutes, deleted when it unmutes.
+# Lets a post-crash restart detect and recover a stuck-muted state.
+_MUTTER_MUTED_FLAG = Path("/tmp/mutter.muted")
 
-    Used to silence music/video on this machine while fn is held so
-    it can't bleed into the mic. Prior mute state isn't preserved —
-    every fn-up turns audio back on regardless. ~9 ms per call.
+
+def _get_system_muted() -> bool:
+    """Return current macOS output mute state. Returns False on error."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", "output muted of (get volume settings)"],
+            capture_output=True, text=True, timeout=2.0,
+        )
+        return r.stdout.strip() == "true"
+    except Exception:
+        return False
+
+
+def _set_system_muted(muted: bool) -> None:
+    """Toggle macOS output mute synchronously (~9 ms).
+
+    Synchronous so caller order is respected — the async-with-& approach
+    allowed a rapid fn-tap to land the mute *after* the unmute, leaving
+    audio stuck muted until the next fn cycle.
     """
     state = "true" if muted else "false"
-    os.system(f"osascript -e 'set volume output muted {state}' &")
+    try:
+        subprocess.run(
+            ["osascript", "-e", f"set volume output muted {state}"],
+            capture_output=True, timeout=2.0,
+        )
+    except Exception:
+        pass
+    try:
+        if muted:
+            _MUTTER_MUTED_FLAG.touch()
+        else:
+            _MUTTER_MUTED_FLAG.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # 8 ms inter-keystroke delay through Screen Sharing — measured
@@ -313,6 +344,7 @@ class MutterDaemon:
         self._tap_loop = None
         self._tap_thread: Optional[threading.Thread] = None
         self._fn_was_on = False
+        self._was_muted: bool = False  # mute state captured on fn-down
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -346,6 +378,7 @@ class MutterDaemon:
         return 0
 
     def shutdown(self) -> None:
+        _set_system_muted(False)
         if self.listener is not None:
             try:
                 self.listener.stop()
@@ -458,7 +491,9 @@ class MutterDaemon:
             if self.state != STATE_IDLE:
                 return
             self.state = STATE_LISTENING
-        _set_system_muted(True)
+        self._was_muted = _get_system_muted()
+        if not self._was_muted:
+            _set_system_muted(True)
         self._turn_deadline = time.monotonic() + _TURN_DEADLINE_SEC
         self.listen_thread = threading.Thread(
             target=self._listen_worker, daemon=True
@@ -470,7 +505,8 @@ class MutterDaemon:
             if self.state != STATE_LISTENING or self.listener is None:
                 return
             self.state = STATE_TRANSCRIBING
-        _set_system_muted(False)
+        if not self._was_muted:
+            _set_system_muted(False)
         try:
             self.listener.finish()
         except Exception as e:
@@ -533,6 +569,9 @@ class MutterDaemon:
             # _listen_worker's "assert self.listener is not None",
             # kill the worker before its finally ran, and leave state
             # stuck in LISTENING forever — every later press a no-op.
+            # Recover from a previous crash that left audio muted.
+            if _MUTTER_MUTED_FLAG.exists():
+                _set_system_muted(False)
             rc = self.start_listener()
             if rc != 0:
                 return rc
@@ -556,6 +595,7 @@ class MutterDaemon:
                         file=sys.stderr,
                         flush=True,
                     )
+                    _set_system_muted(False)
                     os._exit(1)
                 time.sleep(0.5)
         finally:

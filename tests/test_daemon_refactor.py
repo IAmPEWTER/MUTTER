@@ -147,104 +147,33 @@ def test_fn_up_without_fn_down():
     print("ok stray fn-up is no-op")
 
 
-def _patch_mute(calls, *, user_muted=False):
-    """Patch the mute primitives onto a fresh on-disk ownership flag.
-
-    Returns (restore_fn, flag_path). ``_apply_mute`` records its arg into
-    ``calls``; ``_system_muted`` reports ``user_muted``; ``_MUTE_OWNED``
-    points at a unique temp path that starts absent.
-    """
-    import os as _os
-    import tempfile
-
-    saved_apply = d._apply_mute
-    saved_muted = d._system_muted
-    saved_flag = d._MUTE_OWNED
-    fd, tmp = tempfile.mkstemp(suffix=".owns-mute")
-    _os.close(fd)
-    _os.unlink(tmp)  # start absent
-    d._apply_mute = lambda muted: calls.append(muted)
-    d._system_muted = lambda: user_muted
-    d._MUTE_OWNED = d.Path(tmp)
-
-    def restore():
-        d._apply_mute = saved_apply
-        d._system_muted = saved_muted
-        d._MUTE_OWNED = saved_flag
-        try:
-            d.Path(tmp).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    return restore, d.Path(tmp)
-
-
 def test_audio_mute_brackets_fn_press():
-    """apply_mute(True) on fn-down with ownership flag set; apply_mute(False)
-    on fn-up with flag cleared. No fire on re-entrant fn-down (state already
-    LISTENING). No fire on stray fn-up (no ownership flag)."""
+    """Mute(True) on fn-down, Mute(False) on fn-up. No fire on
+    re-entrant fn-down (state already LISTENING). No fire on stray
+    fn-up (state already IDLE)."""
+    saved = d._set_system_muted
     calls: list = []
-    restore, flag = _patch_mute(calls, user_muted=False)
+    d._set_system_muted = lambda muted: calls.append(muted)
     try:
         dm = _new_daemon_with_fake_listener()
         dm._on_fn_down()
         assert calls == [True]
-        assert flag.exists()
         assert dm.listener.listen_called.wait(timeout=1.0)
         # Re-entrant fn-down while LISTENING — must NOT re-mute.
         dm._on_fn_down()
         assert calls == [True]
         dm._on_fn_up()
         assert calls == [True, False]
-        assert not flag.exists()
         dm.listen_thread.join(timeout=2.0)
 
-        # Stray fn-up while IDLE, no ownership flag — must NOT unmute.
+        # Stray fn-up while IDLE — must NOT unmute.
         dm2 = _new_daemon_with_fake_listener()
         calls.clear()
         dm2._on_fn_up()
         assert calls == []
     finally:
-        restore()
+        d._set_system_muted = saved
     print("ok audio mute brackets fn press")
-
-
-def test_mute_for_turn_noop_when_user_already_muted():
-    """If the user already muted output, MUTTER neither re-mutes nor claims
-    ownership — so the paired restore leaves their mute intact."""
-    calls: list = []
-    restore, flag = _patch_mute(calls, user_muted=True)
-    try:
-        d._mute_for_turn()
-        assert calls == []          # never touched audio
-        assert not flag.exists()    # claimed no ownership
-        d._restore_after_turn()
-        assert calls == []          # restore leaves the user's mute alone
-    finally:
-        restore()
-    print("ok mute_for_turn no-op when user already muted")
-
-
-def test_restore_recovers_only_mutter_owned_mute():
-    """_restore_after_turn() unmutes IFF the ownership flag is present
-    (crash recovery), and is idempotent. No flag → never clobbers."""
-    calls: list = []
-    restore, flag = _patch_mute(calls)
-    try:
-        # No flag → user's audio is left untouched.
-        d._restore_after_turn()
-        assert calls == []
-        # Flag present (a crash left audio muted) → unmute + clear.
-        flag.touch()
-        d._restore_after_turn()
-        assert calls == [False]
-        assert not flag.exists()
-        # Idempotent: a second call does nothing.
-        d._restore_after_turn()
-        assert calls == [False]
-    finally:
-        restore()
-    print("ok restore recovers only mutter-owned mute")
 
 
 def test_empty_transcript_no_type():
@@ -414,8 +343,6 @@ def main():
     test_double_fn_down_is_noop()
     test_fn_up_without_fn_down()
     test_audio_mute_brackets_fn_press()
-    test_mute_for_turn_noop_when_user_already_muted()
-    test_restore_recovers_only_mutter_owned_mute()
     test_empty_transcript_no_type()
     test_whitespace_only_transcript_no_type()
     test_fn_transition_logic()

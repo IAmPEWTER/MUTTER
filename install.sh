@@ -30,4 +30,4 @@ else
     git clone --quiet "$REPO" "$DEST"
 fi
 
-bash "$DEST/install.command"
+bash "$DEST/mac/install.command"

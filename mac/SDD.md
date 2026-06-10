@@ -181,7 +181,7 @@ the service (~few ms if it's up; up to 180 s wait if it's still warming).
 ## File tree
 
 ```
-MUTTER/
+MUTTER/mac/
 ├── SDD.md                       — this file
 ├── README.md                    — setup instructions for the user
 ├── mutter/

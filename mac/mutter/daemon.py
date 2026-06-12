@@ -18,6 +18,12 @@ State machine (3 states)::
 
     IDLE ── fn-down ──→ LISTENING ── fn-up ──→ TRANSCRIBING ──→ IDLE
 
+The state machine guards CAPTURE only. Transcription + injection run
+on a separate FIFO queue (one consumer thread), so state returns to
+IDLE the moment capture ends and a slow transcription can never
+swallow the next press. Marathon holds loop capture in ≤120 s
+segments — nothing past the cap is lost.
+
 Re-entrancy: a second fn-down while LISTENING is a no-op; an fn-up
 in IDLE is a no-op. Stray half-events cannot corrupt state.
 """
@@ -25,6 +31,7 @@ in IDLE is a no-op. Stray half-events cannot corrupt state.
 from __future__ import annotations
 
 import os
+import queue
 import signal
 import sys
 import threading
@@ -32,7 +39,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from mutter.stt import Listener, is_available
+from mutter.stt import Listener, is_available, notify_user
 from mutter.whisper_client import WhisperClient, wait_for_service
 
 try:
@@ -126,6 +133,15 @@ def _sanitize(text: str) -> str:
     while "  " in cleaned:
         cleaned = cleaned.replace("  ", " ")
     return cleaned.strip()
+
+
+def _copy_to_clipboard(text: str) -> None:
+    """Last-resort delivery when typing fails: never lose a dictation."""
+    try:
+        import subprocess
+        subprocess.run(["pbcopy"], input=text.encode("utf-8"), timeout=5)
+    except Exception as e:
+        print(f"mutter: pbcopy failed: {e}", file=sys.stderr)
 
 
 def _set_system_muted(muted: bool) -> None:
@@ -314,6 +330,12 @@ class MutterDaemon:
         self.should_exit = False
         self._turn_deadline: Optional[float] = None
 
+        # Transcribe+inject pipeline: captured segments queue here and
+        # a single consumer drains them in strict FIFO order, so text
+        # always lands in spoken order even across turns.
+        self._tx_queue: "queue.Queue" = queue.Queue()
+        self._tx_thread: Optional[threading.Thread] = None
+
         # Event-tap state. All touched on the tap's CFRunLoop thread.
         self._tap = None
         self._tap_source = None
@@ -353,6 +375,14 @@ class MutterDaemon:
         return 0
 
     def shutdown(self) -> None:
+        # Let queued transcriptions land before exit (never-drop) —
+        # bounded so a wedged whisper service can't hang shutdown.
+        try:
+            deadline = time.monotonic() + 30.0
+            while self._tx_queue.unfinished_tasks and time.monotonic() < deadline:
+                time.sleep(0.1)
+        except Exception:
+            pass
         if self.listener is not None:
             try:
                 self.listener.stop()
@@ -467,10 +497,12 @@ class MutterDaemon:
 
     def _on_fn_down(self) -> None:
         with self._state_lock:
-            if self.state != STATE_IDLE:
+            if self.state != STATE_IDLE or self.listener is None:
                 return
             self.state = STATE_LISTENING
         _set_system_muted(True)
+        self.listener.begin_turn()
+        self._ensure_tx_worker()
         self._turn_deadline = time.monotonic() + _TURN_DEADLINE_SEC
         self.listen_thread = threading.Thread(
             target=self._listen_worker, daemon=True
@@ -509,28 +541,73 @@ class MutterDaemon:
             self._on_fn_up()
 
     # ------------------------------------------------------------------
-    # Worker — runs the listen/transcribe/inject pipeline so the tap
-    # callback returns immediately.
+    # Capture worker — records segments and hands them to the tx queue
+    # so the tap callback returns immediately and a slow transcription
+    # never blocks (or swallows) the next press.
     # ------------------------------------------------------------------
 
     def _listen_worker(self) -> None:
         assert self.listener is not None
-        transcript: Optional[str] = None
         try:
-            transcript = self.listener.listen(
-                silence_duration=3600.0,
-                max_duration=120.0,
-            )
-        except RuntimeError as e:
-            print(f"mutter: mic error: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"mutter: listen error: {e}", file=sys.stderr)
+            while True:
+                self._turn_deadline = time.monotonic() + _TURN_DEADLINE_SEC
+                audio = None
+                error = False
+                try:
+                    audio = self.listener.capture(
+                        silence_duration=3600.0,
+                        max_duration=120.0,
+                    )
+                except RuntimeError as e:
+                    print(f"mutter: mic error: {e}", file=sys.stderr)
+                    error = True
+                except Exception as e:
+                    print(f"mutter: capture error: {e}", file=sys.stderr)
+                    error = True
+                if audio is not None:
+                    self._tx_queue.put(audio)
+                with self._state_lock:
+                    listening = self.state == STATE_LISTENING
+                if error:
+                    if listening:
+                        # Mic died mid-hold. The eventual fn-up will
+                        # no-op once we drop to IDLE, so unmute here or
+                        # the system stays muted.
+                        _set_system_muted(False)
+                    break
+                if not listening:
+                    break
+                # Still LISTENING: the 120 s segment cap fired while fn
+                # was held. Loop straight into a fresh capture so a
+                # marathon dictation streams out in segments instead of
+                # losing everything after the cap.
         finally:
-            if transcript:
-                self._inject(transcript)
             with self._state_lock:
                 self.state = STATE_IDLE
             self._turn_deadline = None
+
+    def _ensure_tx_worker(self) -> None:
+        if self._tx_thread is not None and self._tx_thread.is_alive():
+            return
+        self._tx_thread = threading.Thread(
+            target=self._tx_loop, daemon=True, name="mutter-tx"
+        )
+        self._tx_thread.start()
+
+    def _tx_loop(self) -> None:
+        """Single consumer: transcribe + inject queued segments in
+        strict FIFO order. Listener.transcribe never raises (failed
+        clips are persisted + notified), so this loop never dies."""
+        while True:
+            audio = self._tx_queue.get()
+            try:
+                text = self.listener.transcribe(audio)
+                if text:
+                    self._inject(text)
+            except Exception as e:
+                print(f"mutter: tx error: {e}", file=sys.stderr)
+            finally:
+                self._tx_queue.task_done()
 
     def _inject(self, text: str) -> None:
         cleaned = _sanitize(text)
@@ -545,6 +622,8 @@ class MutterDaemon:
                 self.keyboard.type(payload)
         except Exception as e:
             print(f"mutter: inject error: {e}", file=sys.stderr)
+            _copy_to_clipboard(cleaned)
+            notify_user("Couldn't type your dictation — it's on the clipboard.")
 
     # ------------------------------------------------------------------
     # Main loop.

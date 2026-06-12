@@ -1,19 +1,28 @@
 """Microphone → whisper service.
 
 Captures audio from the built-in microphone (never the system-default
-input — see :func:`_builtin_input_device`), auto-stops when the user
-falls silent (simple RMS VAD), and transcribes via the machine-wide
-whisper unix-socket service at ``~/.whisper-service``.
+input — see :func:`_builtin_input_device`) and transcribes via the
+machine-wide whisper unix-socket service at ``~/.whisper-service``.
 
-Usage::
+Capture and transcription are separate calls so the daemon can queue
+slow transcriptions without blocking (or losing) the next capture::
 
     from mutter.stt import Listener
 
     ears = Listener()
-    ears.start()
-    transcript = ears.listen()
-    if transcript:
-        print(f"You said: {transcript}")
+    ears.begin_turn()
+    audio = ears.capture()          # stopped by VAD or ears.finish()
+    if audio is not None:
+        text = ears.transcribe(audio)
+
+Never-drop guarantees:
+    - ``capture`` returns audio only when there is acoustic evidence of
+      speech — true silence never reaches whisper (whisper hallucinates
+      on silence).
+    - ``transcribe`` never raises; if the whisper service fails, the
+      clip is persisted to ``~/.mutter/pending/`` and the user notified.
+    - ``collapse_repeats`` bounds whisper's repeat-loop pathology to a
+      single phrase instead of a 500-line spew.
 
 The VAD is a pure dataclass (:class:`_VadState`) so tests can drive
 its transitions with synthetic timestamps.
@@ -23,11 +32,11 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, List, Optional
 
 from mutter.whisper_client import WhisperClient
@@ -98,68 +107,112 @@ MIN_CAPTURED_SEC = 0.3
 #: resolution to notice a gap between words without flooding the lock.
 DEFAULT_BLOCK_SECONDS = 0.05
 
+#: Lenient speech-evidence gate for push-to-talk: at least this many
+#: 50 ms callback blocks above the RMS threshold (not necessarily
+#: contiguous) before a capture is worth transcribing. Looser than the
+#: VAD's ``has_spoken`` (0.25 s contiguous) so quiet/short utterances
+#: pass; strict enough that silence and fan noise never reach whisper.
+MIN_SPEECH_FRAMES = 3
+
 
 # ---------------------------------------------------------------------------
-# Hallucination filter
+# Repeat-collapse
 #
-# Whisper has a well-known habit of emitting boilerplate strings on silent
-# or near-silent audio ("Thanks for watching.", "Subscribe."). These tank
-# UX because the user hears the system react to nothing. We filter them.
+# Whisper's decoder can lock into a loop on noisy or marginal audio and
+# emit the same phrase hundreds of times ("Thank you. Thank you. ...").
+# The acoustic gate in capture() keeps true silence away from whisper
+# entirely; this bounds the damage when real-but-noisy audio still
+# triggers a loop: the run collapses to one instance, so the worst case
+# types one phrase, never a spew. A deliberate short dictation ("okay",
+# "thank you") is never dropped — PTT means the user pressed on purpose.
 # ---------------------------------------------------------------------------
 
-_HALLUCINATIONS = frozenset(
-    {
-        "thank you",
-        "thanks",
-        "thanks for watching",
-        "thank you for watching",
-        "thank you so much",
-        "subscribe",
-        "please subscribe",
-        "like and subscribe",
-        "subscribe to my channel",
-        "bye",
-        "goodbye",
-        "you",
-        "the end",
-        "so",
-        "yeah",
-        "okay",
-        "ok",
-        "um",
-        "uh",
-        "mm",
-        "hmm",
-    }
-)
-
-# Repeat pattern: "thank you. thank you. thank you." or ". . .". Whisper
-# loops on silence. Anchored.
-_HALLUCINATION_REPEAT_RE = re.compile(
-    r"^\s*(?:(?:thank you|thanks|bye|you|ok|okay|the end|so|yeah|mm|hmm|uh|um)"
-    r"[\s.!?,]*){1,}$",
-    re.IGNORECASE,
-)
+_WORD_EDGE_PUNCT = ".,!?;:"
 
 
-def is_hallucination(text: str) -> bool:
-    """Return True if ``text`` looks like a Whisper silence hallucination.
+def _collapse_repeats_once(words: List[str], norm: List[str],
+                           min_repeats: int, max_period: int) -> List[str]:
+    n = len(words)
+    out: List[str] = []
+    i = 0
+    while i < n:
+        for period in range(1, min(max_period, (n - i) // min_repeats) + 1):
+            reps = 1
+            while (i + (reps + 1) * period <= n
+                   and norm[i + reps * period: i + (reps + 1) * period]
+                   == norm[i: i + period]):
+                reps += 1
+            if reps >= min_repeats:
+                out.extend(words[i: i + period])
+                i += reps * period
+                break
+        else:
+            out.append(words[i])
+            i += 1
+    return out
 
-    Conservative: only returns True for the exact known phrases or for
-    strings that are *only* made of filler tokens. Real transcripts with
-    a "thanks" in the middle pass through.
+
+def collapse_repeats(text: str, min_repeats: int = 4, max_period: int = 8) -> str:
+    """Collapse runs of ``min_repeats``+ consecutive identical word
+    groups (1..``max_period`` words, compared case- and punctuation-
+    insensitively) down to a single instance, repeating until stable.
+
+    Real dictation is untouched — nobody says the same phrase four
+    times in a row; if they truly do, one instance still types.
     """
-    if text is None:
-        return True
-    cleaned = text.strip()
-    if not cleaned:
-        return True
-    lowered = cleaned.lower().rstrip(".!?,")
-    if lowered in _HALLUCINATIONS:
-        return True
-    if _HALLUCINATION_REPEAT_RE.match(cleaned):
-        return True
-    return False
+    while True:
+        words = text.split()
+        if len(words) < min_repeats:
+            return text
+        norm = [w.lower().strip(_WORD_EDGE_PUNCT) for w in words]
+        out = _collapse_repeats_once(words, norm, min_repeats, max_period)
+        collapsed = " ".join(out)
+        if collapsed == text:
+            return text
+        text = collapsed
+
+
+# ---------------------------------------------------------------------------
+# Never-drop plumbing — user notification + failed-clip persistence.
+# ---------------------------------------------------------------------------
+
+_PENDING_DIR = Path.home() / ".mutter" / "pending"
+
+
+def notify_user(message: str) -> None:
+    """Best-effort macOS notification banner. Never raises, never blocks."""
+    try:
+        import json
+        import subprocess
+        script = (
+            f"display notification {json.dumps(message)} "
+            f'with title "MUTTER"'
+        )
+        subprocess.Popen(
+            ["osascript", "-e", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+def _persist_pending_audio(audio: Any, sample_rate: int) -> Optional[Path]:
+    """Save a clip that failed to transcribe as a WAV under
+    ``~/.mutter/pending/`` so a dictation is never silently lost."""
+    try:
+        import wave
+        _PENDING_DIR.mkdir(parents=True, exist_ok=True)
+        path = _PENDING_DIR / time.strftime("%Y%m%d-%H%M%S.wav")
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(CHANNELS)
+            w.setsampwidth(SAMPLE_WIDTH)
+            w.setframerate(sample_rate)
+            w.writeframes(audio.tobytes())
+        return path
+    except Exception as e:
+        print(f"mutter: failed to persist audio: {e}", file=sys.stderr)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -289,15 +342,17 @@ class _VadState:
 
 @dataclass
 class Listener:
-    """Microphone → local Whisper transcriber.
+    """Microphone capture + local Whisper transcription, as two steps.
 
-    Call :meth:`listen` to record one utterance and get back a clean
-    transcript string (or ``None`` if nothing meaningful was captured).
-    Use as a context manager to ensure the audio stream is closed on exit.
+    Per turn: :meth:`begin_turn`, then :meth:`capture` on a worker
+    thread (stopped by VAD, the duration cap, or :meth:`finish` from
+    another thread), then :meth:`transcribe` on the captured audio —
+    typically from a separate queue so a slow transcription can't
+    block the next capture.
 
-    Thread-safety: :meth:`listen`, :meth:`cancel`, and :meth:`current_rms`
-    may be called from any thread. Only one ``listen`` at a time — the
-    audio stream is a shared resource.
+    Thread-safety: :meth:`capture`, :meth:`finish`, :meth:`begin_turn`
+    and :meth:`stop` may be called from any thread. Only one ``capture``
+    at a time — the audio stream is a shared resource.
 
     Parameters (all optional):
         model: HF repo id of the warm model the whisper service should
@@ -329,15 +384,13 @@ class Listener:
     _recording: bool = field(default=False, repr=False)
     _vad: Optional[_VadState] = field(default=None, repr=False)
     _current_rms: int = field(default=0, repr=False)
+    _speech_frames: int = field(default=0, repr=False)
+    _finish_requested: bool = field(default=False, repr=False)
     _logged_device: Any = field(default="?", repr=False)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-
-    def start(self) -> None:
-        """No-op kept for context-manager parity. The client is built
-        in :meth:`__post_init__`; the mic stream is opened by :meth:`listen`."""
 
     def stop(self) -> None:
         """Close the audio stream. Idempotent."""
@@ -345,27 +398,34 @@ class Listener:
             self._recording = False
             self._frames = []
             self._vad = None
+            self._finish_requested = False
         self._close_stream()
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def listen(
+    def begin_turn(self) -> None:
+        """Called at key-down, before the capture worker spawns. Clears
+        any stale finish flag from a previous turn so it can't cancel
+        this one."""
+        with self._lock:
+            self._finish_requested = False
+
+    def capture(
         self,
         *,
         silence_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
         poll_interval: float = 0.01,
-    ) -> Optional[str]:
-        """Record one utterance and return the transcript (or None).
+    ) -> Optional[Any]:
+        """Record one utterance; return int16 mono PCM, or ``None`` when:
 
-        Returns ``None`` in any of these cases:
-            - User never spoke (RMS stayed below threshold)
-            - Captured clip was shorter than :data:`MIN_CAPTURED_SEC`
-            - Transcript was empty
-            - Transcript matched a known Whisper hallucination
-            - A concurrent :meth:`cancel` aborted the recording
+            - :meth:`finish` raced ahead of this call (quick tap — the
+              fn-up arrived before the worker thread got here)
+            - there is no acoustic evidence of speech (true silence
+              must never reach whisper: it hallucinates)
+            - the clip is shorter than :data:`MIN_CAPTURED_SEC`
 
         Parameters are one-shot overrides of the defaults on ``self``.
         """
@@ -375,17 +435,24 @@ class Listener:
         self._ensure_stream()
 
         with self._lock:
-            self._frames = []
-            vad = _VadState(
-                silence_threshold=self.silence_threshold,
-                min_speech_duration=self.min_speech_duration,
-                silence_duration=sd_dur,
-                max_duration=md_dur,
-            )
-            vad.begin(time.monotonic())
-            self._vad = vad
-            self._recording = True
-            self._current_rms = 0
+            fast_finish = self._finish_requested
+            self._finish_requested = False
+            if not fast_finish:
+                self._frames = []
+                vad = _VadState(
+                    silence_threshold=self.silence_threshold,
+                    min_speech_duration=self.min_speech_duration,
+                    silence_duration=sd_dur,
+                    max_duration=md_dur,
+                )
+                vad.begin(time.monotonic())
+                self._vad = vad
+                self._recording = True
+                self._current_rms = 0
+                self._speech_frames = 0
+        if fast_finish:
+            self._close_stream()
+            return None
 
         # Poll until the callback decides we're done.
         try:
@@ -400,13 +467,18 @@ class Listener:
                 self._recording = False
                 frames = list(self._frames)
                 final_vad = self._vad
+                speech_frames = self._speech_frames
                 self._frames = []
                 self._vad = None
             # Close before whisper runs so the mic indicator is only
             # on while the user is holding the key.
             self._close_stream()
 
-        if not frames or final_vad is None or not final_vad.has_spoken:
+        if not frames or final_vad is None:
+            return None
+        if not (final_vad.has_spoken or speech_frames >= MIN_SPEECH_FRAMES):
+            # Held in silence / pure ambient: zero speech evidence.
+            # Transcribing this is how "Thank you." x500 happens.
             return None
 
         try:
@@ -417,38 +489,54 @@ class Listener:
         audio = np.concatenate(frames, axis=0).reshape(-1)
         if audio.size < int(self.sample_rate * MIN_CAPTURED_SEC):
             return None
+        return audio
 
-        text = self._do_transcribe(audio)
+    def transcribe(self, audio: Any) -> Optional[str]:
+        """Captured audio → clean transcript, or ``None`` for
+        nothing-to-type.
+
+        Never raises and never silently loses speech: if the whisper
+        service fails, the clip is persisted to ``~/.mutter/pending/``
+        and the user is notified.
+        """
+        try:
+            text = self._do_transcribe(audio)
+        except Exception as e:
+            saved = _persist_pending_audio(audio, self.sample_rate)
+            where = f" — saved to {saved}" if saved else ""
+            print(
+                f"mutter: transcribe failed: {e}{where}",
+                file=sys.stderr,
+                flush=True,
+            )
+            notify_user(
+                "Transcription failed — audio saved to ~/.mutter/pending"
+            )
+            return None
+        text = (text or "").strip()
         if not text:
             return None
-        text = text.strip()
-        if is_hallucination(text):
-            return None
-        return text
+        return collapse_repeats(text)
 
     def finish(self) -> None:
-        """Stop recording NOW and transcribe what we have.
-
-        Unlike :meth:`cancel`, preserves the captured frames so the
-        in-flight :meth:`listen` call will flip out of its poll loop
-        and run Whisper on the audio gathered so far.
+        """Stop recording NOW; the in-flight :meth:`capture` returns
+        whatever was gathered so far.
 
         Used by push-to-talk clients: the user says "I'm done" by
-        pressing a key instead of waiting for VAD silence, and we
-        want the transcript of whatever they said up to that point —
-        even if the VAD never confirmed "has_spoken" (short
-        utterances, quiet voice, etc).
+        releasing the key instead of waiting for VAD silence.
+
+        If :meth:`capture` hasn't initialized yet (a quick tap delivers
+        the key-up before the worker thread gets there), leaves a flag
+        so it exits immediately instead of starting a recording that
+        nothing would ever stop.
 
         Idempotent: calling on an already-stopped listener is a no-op.
         """
         with self._lock:
             if self._vad is not None:
-                # Force the VAD out of both "still waiting for speech"
-                # and "still waiting for silence" at the same time, so
-                # the listen() post-check passes the has_spoken gate
-                # and transcribes whatever frames we have.
-                self._vad.has_spoken = True
                 self._vad.finished = True
+            else:
+                self._finish_requested = True
             self._recording = False
 
     # ------------------------------------------------------------------
@@ -531,6 +619,8 @@ class Listener:
                 self._frames.append(indata)
             rms = _compute_rms_int16(indata)
             self._current_rms = rms
+            if rms > self._vad.silence_threshold:
+                self._speech_frames += 1
             if self._vad.update(rms, time.monotonic()):
                 self._recording = False
 

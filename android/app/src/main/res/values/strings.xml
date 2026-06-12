@@ -11,6 +11,11 @@
     <string name="notif_recording_title">MUTTER is listening</string>
     <string name="notif_recording_text">Release volume-down to transcribe.</string>
 
+    <string name="notif_error_channel_name">Dictation problems</string>
+    <string name="notif_transcribe_failed_title">Transcription failed — audio saved</string>
+    <string name="notif_transcribe_failed_text">Your dictation audio was saved as %1$s. It is not lost.</string>
+    <string name="notif_inject_failed_title">Couldn\'t insert text — it\'s on your clipboard</string>
+
     <string name="setup_title">MUTTER setup</string>
     <string name="setup_step_mic">1. Microphone access</string>
     <string name="setup_step_mic_desc">Allow MUTTER to record audio. Audio is processed on-device and never leaves the phone.</string>

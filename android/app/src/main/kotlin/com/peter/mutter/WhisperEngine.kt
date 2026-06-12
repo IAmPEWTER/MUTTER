@@ -65,8 +65,17 @@ class WhisperEngine(private val modelDir: File) {
     @Synchronized
     fun isLoaded(): Boolean = recognizer != null
 
-    fun transcribe(samples: FloatArray, sampleRate: Int): String {
-        val rec = synchronized(this) { recognizer } ?: return ""
+    /**
+     * Returns the transcript, "" when the engine legitimately heard nothing,
+     * or null when transcription FAILED (not loaded / native error) — callers
+     * must persist the audio on null so speech is never silently lost.
+     *
+     * Synchronized so release()/load() (daily recycle, unbind) can never free
+     * the native recognizer mid-decode — that was a native-crash window.
+     */
+    @Synchronized
+    fun transcribe(samples: FloatArray, sampleRate: Int): String? {
+        val rec = recognizer ?: return null
         if (samples.isEmpty()) return ""
         val stream = rec.createStream()
         return try {
@@ -75,7 +84,7 @@ class WhisperEngine(private val modelDir: File) {
             rec.getResult(stream).text ?: ""
         } catch (t: Throwable) {
             Log.e(tag, "transcribe failed", t)
-            ""
+            null
         } finally {
             try { stream.release() } catch (_: Throwable) {}
         }

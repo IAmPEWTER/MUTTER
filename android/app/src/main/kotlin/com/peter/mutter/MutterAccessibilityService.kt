@@ -193,16 +193,20 @@ class MutterAccessibilityService : AccessibilityService() {
     // single `worker` thread, so injectedThisHold is race-free and the
     // separating space between chunks is added exactly once.
     private fun transcribeAndInject(samples: FloatArray) {
-        if (!engine.isLoaded()) {
-            val ok = engine.load()
-            if (!ok) {
-                Log.e(tag, "engine load failed at transcribe time")
-                haptic(100)
-                return
-            }
+        if (!engine.isLoaded() && !engine.load()) {
+            Log.e(tag, "engine load failed at transcribe time")
+            persistChunk(samples)
+            haptic(100)
+            return
         }
-        val raw = engine.transcribe(samples, 16000).trim()
-        if (raw.isEmpty()) {
+        val raw = engine.transcribe(samples, 16000)
+        if (raw == null) {
+            // Engine failure — the audio must not be lost.
+            persistChunk(samples)
+            haptic(100)
+            return
+        }
+        if (raw.isBlank()) {
             Log.i(tag, "empty transcript")
             return
         }
@@ -220,6 +224,17 @@ class MutterAccessibilityService : AccessibilityService() {
             Log.w(tag, "injection failed; text on clipboard")
             haptic(80)
         }
+    }
+
+    // Never-drop: a chunk that could not be transcribed is written to
+    // filesDir/pending/ as a WAV and surfaced via notification.
+    private fun persistChunk(samples: FloatArray) {
+        val f = PendingAudio.save(this, samples, 16000)
+        NotificationHelper.notifyError(
+            this,
+            getString(R.string.notif_transcribe_failed_title),
+            getString(R.string.notif_transcribe_failed_text, f?.name ?: "pending/"),
+        )
     }
 
     private fun findFocusedEditable(): AccessibilityNodeInfo? {

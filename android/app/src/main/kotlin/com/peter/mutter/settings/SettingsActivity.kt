@@ -9,6 +9,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.SwitchCompat
 import androidx.lifecycle.lifecycleScope
+import com.peter.mutter.BuildConfig
 import com.peter.mutter.Prefs
 import com.peter.mutter.R
 import com.peter.mutter.updater.UpdateChecker
@@ -36,7 +37,8 @@ class SettingsActivity : AppCompatActivity() {
             Prefs.setInterceptEnabled(this, checked)
         }
 
-        findViewById<TextView>(R.id.about_text).text = getString(R.string.settings_about_desc)
+        findViewById<TextView>(R.id.about_text).text =
+            getString(R.string.settings_about_desc, BuildConfig.VERSION_NAME)
 
         updaterStatus = findViewById(R.id.updater_status)
         btnCheckUpdates = findViewById(R.id.btn_check_updates)

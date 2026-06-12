@@ -96,9 +96,12 @@ android/
 │       │   └── settings/SettingsActivity.kt
 │       └── res/
 │           ├── xml/accessibility_service_config.xml
-│           └── values, layout, drawable, mipmap-*
+│           └── values, layout, drawable, color, font, mipmap-anydpi-v26
+├── art/ic_launcher.svg            — icon design source (vector drawable mirrors it)
 └── (gradle wrapper, settings, etc.)
 ```
+
+UI follows the Margo design tokens (`~/Desktop/Margo/Website and design/design/DESIGN_TOKENS.md`): Graphite palette, Geist type, pill controls.
 
 ## Build from source
 

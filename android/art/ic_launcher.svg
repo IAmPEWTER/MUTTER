@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108">
+  <rect width="108" height="108" fill="#1A1B1B"/>
+  <g fill="none" stroke="#E6E4DF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <!-- M : x 34..74 (40 wide), y 30..58 (cap 28), center 54, vee bottom y49 -->
+    <path d="M34,58 L34,30 L54,49 L74,30 L74,58"/>
+    <!-- UTTER : x 31.5..76.5 (45 wide), cap 12, baseline y76 (y 64..76) -->
+    <!-- U  31.5..38.0 -->
+    <path d="M31.5,64 L31.5,72.5 A3.25,3.25 0 0,0 38,72.5 L38,64"/>
+    <!-- T  41.0..47.5  stem 44.25 -->
+    <path d="M41,64 L47.5,64 M44.25,64 L44.25,76"/>
+    <!-- T  50.5..57.0  stem 53.75 -->
+    <path d="M50.5,64 L57,64 M53.75,64 L53.75,76"/>
+    <!-- E  60.0..66.5 -->
+    <path d="M66.5,64 L60,64 L60,76 L66.5,76 M60,70 L65,70"/>
+    <!-- R  69.5..76.0 -->
+    <path d="M69.5,76 L69.5,64 L73.5,64 A2.5,2.5 0 0,1 73.5,69 L69.5,69 M73,69 L76,76"/>
+  </g>
+</svg>

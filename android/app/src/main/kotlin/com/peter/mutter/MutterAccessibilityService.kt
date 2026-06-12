@@ -193,10 +193,6 @@ class MutterAccessibilityService : AccessibilityService() {
     // single `worker` thread, so injectedThisHold is race-free and the
     // separating space between chunks is added exactly once.
     private fun transcribeAndInject(samples: FloatArray) {
-        if (EnergyGate.isSilent(samples, 16000)) {
-            Log.i(tag, "energy gate dropped silent chunk")
-            return
-        }
         if (!engine.isLoaded()) {
             val ok = engine.load()
             if (!ok) {
@@ -210,11 +206,10 @@ class MutterAccessibilityService : AccessibilityService() {
             Log.i(tag, "empty transcript")
             return
         }
-        if (HallucinationFilter.isHallucination(raw)) {
-            Log.i(tag, "hallucination filtered (len=${raw.length})")
-            return
-        }
-        val clean = Sanitizer.sanitize(raw)
+        // The VAD confirmed speech in this chunk, so trust the transcript:
+        // deliberate short utterances ("okay", "thank you") always type. A
+        // decoder repeat-loop is bounded to one instance by collapseRepeats.
+        val clean = Sanitizer.collapseRepeats(Sanitizer.sanitize(raw))
         if (clean.isEmpty()) return
         val text = if (injectedThisHold) " $clean" else clean
         val node = findFocusedEditable() ?: lastInputNode ?: findPasteTarget()

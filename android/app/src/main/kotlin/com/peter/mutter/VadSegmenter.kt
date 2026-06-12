@@ -15,9 +15,10 @@ import java.io.File
  * Buffering is ours, not sherpa's: [Vad.compute] only scores a window and
  * advances the model state, it never queues audio, so memory stays flat.
  *
- * Robustness: if the VAD model is missing or a window is the wrong size, every
- * window counts as speech and the endpointer's 25s emergency cut still bounds
- * chunk length — degraded (no pause-splitting) but never a failure.
+ * Robustness: if the VAD model is missing or a window is the wrong size,
+ * per-window RMS stands in for the VAD — degraded (coarser speech detection)
+ * but never a failure, and a silent hold still emits no chunks. The
+ * endpointer's 25s emergency cut bounds chunk length in every mode.
  */
 class VadSegmenter(
     private val modelPath: String,
@@ -76,7 +77,10 @@ class VadSegmenter(
                 true // fall back to speech so the emergency cut still bounds length
             }
         } else {
-            true
+            // Degraded mode (VAD model missing / odd window size): RMS stands
+            // in for the VAD so a silent hold still emits no chunks instead of
+            // feeding 25 s of silence to whisper (which hallucinates on it).
+            EnergyGate.rms(window) >= DEGRADED_RMS_THRESHOLD
         }
         buffer.add(window)
         if (isSpeech) chunkHasSpeech = true
@@ -105,6 +109,11 @@ class VadSegmenter(
         vad = null
         buffer.clear()
         chunkHasSpeech = false
+    }
+
+    private companion object {
+        // Degraded-mode speech threshold, float-PCM scale (~ -40 dBFS).
+        const val DEGRADED_RMS_THRESHOLD = 0.01f
     }
 
     private fun emitChunk() {

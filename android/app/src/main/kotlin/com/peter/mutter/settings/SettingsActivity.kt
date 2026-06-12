@@ -5,9 +5,9 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
+import android.widget.CompoundButton
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.SwitchCompat
 import androidx.lifecycle.lifecycleScope
 import com.peter.mutter.BuildConfig
 import com.peter.mutter.Prefs
@@ -31,7 +31,7 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_settings)
 
-        val toggle = findViewById<SwitchCompat>(R.id.toggle_intercept)
+        val toggle = findViewById<CompoundButton>(R.id.toggle_intercept)
         toggle.isChecked = Prefs.isInterceptEnabled(this)
         toggle.setOnCheckedChangeListener { _, checked ->
             Prefs.setInterceptEnabled(this, checked)

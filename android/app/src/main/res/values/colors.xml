@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Margo Graphite palette (Margo design/DESIGN_TOKENS.md §1). No invented colors. -->
 <resources>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
-    <color name="ic_launcher_background">#FF080514</color>
+    <color name="bg">#1A1B1B</color>
+    <color name="surface">#1F2121</color>
+    <color name="elevated">#262828</color>
+    <color name="hairline">#2A2C2C</color>
+    <color name="text">#E6E4DF</color>
+    <color name="text_dim">#9A9B97</color>
+    <color name="text_muted">#6B6D6B</color>
+    <color name="accent">#20B8CE</color>
+    <color name="danger">#D97757</color>
+    <color name="ic_launcher_background">#1A1B1B</color>
 </resources>

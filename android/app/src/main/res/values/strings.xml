@@ -16,7 +16,7 @@
     <string name="notif_transcribe_failed_text">Your dictation audio was saved as %1$s. It is not lost.</string>
     <string name="notif_inject_failed_title">Couldn\'t insert text — it\'s on your clipboard</string>
 
-    <string name="setup_title">MUTTER setup</string>
+    <string name="setup_tagline">On-device dictation</string>
     <string name="setup_step_mic">1. Microphone access</string>
     <string name="setup_step_mic_desc">Allow MUTTER to record audio. Audio is processed on-device and never leaves the phone.</string>
     <string name="setup_step_restricted">2. Allow restricted settings</string>
@@ -41,6 +41,9 @@
 
     <string name="setup_test_hint">Tap, then hold volume-down to dictate…</string>
 
+    <string name="settings_section_dictation">Dictation</string>
+    <string name="toggle_on">On</string>
+    <string name="toggle_off">Off</string>
     <string name="settings_intercept_enabled">Volume-down intercept</string>
     <string name="settings_intercept_enabled_desc">When off, volume-down behaves normally everywhere.</string>
     <string name="settings_about">About</string>

@@ -148,6 +148,7 @@ class SetupActivity : AppCompatActivity() {
 
     private fun setStatus(label: TextView, button: Button, ok: Boolean) {
         label.text = if (ok) "✓ done" else "✗ pending"
+        label.setTextColor(getColor(if (ok) R.color.text_muted else R.color.text))
         button.isEnabled = !ok
         button.text = if (ok) getString(R.string.action_done) else button.text
     }

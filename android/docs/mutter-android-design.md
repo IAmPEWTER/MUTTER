@@ -37,12 +37,13 @@ Gated by `findFocus(FOCUS_INPUT).isEditable()` on key DOWN. False → pass throu
             each cut ─────┤  ← streaming: fires mid-hold
                           ▼
                 sherpa-onnx OfflineRecognizer.decode (per chunk)
-                  + hallucination filter (port of mutter/stt.py)
-                  + energy gate
+                  + collapseRepeats (bounds whisper repeat-loops)
                           │
                           ▼
-  set clipboard → ACTION_PASTE → restore clipboard ~200 ms later
-       (chunks injected in spoken order, space-separated)
+  set clipboard → ACTION_PASTE → (refused? ACTION_SET_TEXT splice)
+       (chunks injected in spoken order, space-separated;
+        end of hold: failed chunks → clipboard + notification,
+        else saved clipboard restored ~200 ms later)
                           ▲
   vol-down UP ──── stop AudioRecord, flush final chunk, stopForeground
 ```
@@ -57,15 +58,14 @@ Non-default manifest attributes:
 - accessibility config: `flagRequestFilterKeyEvents`
 - permission: `FOREGROUND_SERVICE_MICROPHONE`
 
-State machine (mirrors mutter/daemon.py):
-
-```
-IDLE ── vol-down DOWN + editable focus ──→ LISTENING
-LISTENING ── vol-down UP ──→ TRANSCRIBING
-TRANSCRIBING ── result/error ──→ IDLE
-```
-
-Only edges drive transitions. Chunks transcribe *during* LISTENING (streaming); TRANSCRIBING just drains the final chunk after UP. A FIFO completion marker on the worker returns to IDLE strictly after the last chunk, so state is never stranded even if UP lands exactly on a cut. Auto-repeat while held is consumed; first DOWN and matching UP only. Galaxy firmware may flash the volume slider for ~50 ms before consumption; cosmetic.
+Capture state is a single `capturing` flag (true between accepted DOWN and
+its UP). Transcription/injection continue on the FIFO worker after UP, so a
+NEW hold starts immediately even while the previous one is still draining — a
+slow transcription can never swallow a press. Each hold carries a `Hold`
+session (target node, spacing flag, failed-chunk list) through the queue, so
+overlapping holds can't cross-talk. Auto-repeat while held is consumed; first
+DOWN and matching UP only. Galaxy firmware may flash the volume slider for
+~50 ms before consumption; cosmetic.
 
 Model load in `onServiceConnected()`:
 1. `OfflineRecognizer` from distil-small.en INT8 in internal storage.
@@ -108,20 +108,30 @@ Buffering is ours (`compute()` never queues audio), so memory stays flat. If the
 3. Extract.
 4. SHA-256 verify against baked-in hash.
 
-### Hallucination filter
+### Transcript hygiene (no blacklist)
 
-Port from `mutter/stt.py`:
-- `_HALLUCINATIONS` frozenset
-- `_HALLUCINATION_REPEAT_RE`
-- `is_hallucination(text)`
+Every chunk reaching the engine carries VAD-confirmed speech, so the
+transcript is trusted: deliberate short dictations ("okay", "thank you")
+always type. `Sanitizer.collapseRepeats` bounds whisper's repeat-loop
+pathology (same phrase ×N, any phrase, period ≤8 words) to one instance.
+Degraded mode (VAD model missing): per-window RMS stands in for Silero, so a
+silent hold still emits no chunks.
 
-Plus energy gate: RMS < threshold AND duration < 1.0 s → drop regardless of transcript.
+Never-drop: engine load/decode failure persists the chunk to
+`filesDir/pending/*.wav` (`PendingAudio`) + notification. `WhisperEngine`
+serializes transcribe/release on its monitor so the daily recycle or unbind
+can't free the native recognizer mid-decode.
 
 ### Text injection
 
-Primary: **paste-and-restore.** Save clipboard, set to transcript, `ACTION_PASTE` on focused node, restore ~200 ms later.
-
-Optional fast-path: `ACTION_SET_TEXT` first; on `false`, fall to paste.
+Primary: **paste-and-restore.** Save clipboard once per hold, set to chunk,
+`ACTION_PASTE` on the target (focused editable → refresh()-validated
+DOWN-node → paste-action fallback). Paste refused → `ACTION_SET_TEXT` splice
+at the cursor. Both fail → the chunk joins the hold's failed list; at end of
+hold the failed text goes ON the clipboard (the saved clipboard is NOT
+restored over it — that used to destroy the transcript) + a notification
+shows it. If a new hold begins inside the 200 ms restore window, begin()
+adopts the pending payload and cancels the late write.
 
 Sanitize (port from `mutter/daemon.py`):
 - `\n`, `\r` → space
@@ -159,7 +169,9 @@ Cold start (post-reboot, first press): ~2 s warmup in `onServiceConnected()`, pa
 
 ## Edge cases
 
-- Re-press during LISTENING/TRANSCRIBING, stale UP during IDLE/TRANSCRIBING: consumed no-op.
+- Re-press while capturing, stale UP while idle: consumed no-op. A press
+  while the previous hold is still *transcribing* starts a new hold
+  immediately (FIFO keeps text in spoken order).
 - Focus disappears mid-hold: keep recording until UP, re-resolve focus at injection.
 - Focus moves mid-hold: inject wherever focus lands at UP.
 - Vol-up while vol-down held: passes through.
@@ -170,8 +182,8 @@ Cold start (post-reboot, first press): ~2 s warmup in `onServiceConnected()`, pa
 - Held in silence: no speech → no chunk emitted (emergency cuts produce silent chunks that the energy gate drops). No buzz, no text.
 - Service killed by OS: Android auto-restarts accessibility services; battery exemption further reduces kill rate.
 - Model download interrupted: resumable HTTP range; SHA-256 re-verified.
-- Transcription failure (sherpa-onnx throws / OOM / model corruption): caught, logged, haptic. No text. Next press retries.
-- Both paste and ACTION_SET_TEXT fail: transcript left on clipboard (no restore), haptic.
+- Transcription failure (sherpa-onnx throws / OOM / model corruption): caught, chunk saved to `pending/*.wav`, notification, haptic. Audio never discarded.
+- Both paste and ACTION_SET_TEXT fail: failed text placed on clipboard at end of hold (restore skipped) + notification, haptic.
 
 ## Caveats
 
@@ -194,9 +206,9 @@ MUTTER/
 │   │   │   ├── AdaptiveEndpointer.kt           — pure cut logic (4s gate, 500→300→200ms, 25s)
 │   │   │   ├── DailyRecycler.kt                — ~5am alarm: recycle recognizer when idle
 │   │   │   ├── WhisperEngine.kt                — sherpa-onnx wrapper
-│   │   │   ├── HallucinationFilter.kt          — port of mutter/stt.py
-│   │   │   ├── EnergyGate.kt                   — RMS silence guard
-│   │   │   ├── TextInjector.kt                 — paste-and-restore + ACTION_SET_TEXT
+│   │   │   ├── EnergyGate.kt                   — RMS (degraded-VAD stand-in)
+│   │   │   ├── PendingAudio.kt                 — failed-chunk WAV persistence
+│   │   │   ├── TextInjector.kt                 — paste → SET_TEXT splice → clipboard+notif
 │   │   │   ├── ModelDownloader.kt              — first-launch fetch (recognizer + VAD) + SHA-256
 │   │   │   ├── setup/                          — wizard activities
 │   │   │   └── settings/SettingsActivity.kt

@@ -26,7 +26,8 @@ One resident Python process. No Karabiner, no shell bridges.
   │ mutter daemon (single process)             │
   │                                            │
   │   CGEventTap on flagsChanged events        │
-  │   └─ edge-detects fn bit in CGEventFlags   │
+  │   └─ keycode 63 (real fn key) only, then   │
+  │      edge-detects fn bit in CGEventFlags   │
   │       │                                    │
   │       ▼                                    │
   │   state machine (IDLE / LISTENING /        │
@@ -61,20 +62,36 @@ IDLE ── fn-down ──→ LISTENING ── fn-up ──→ TRANSCRIBING ─�
                        └── listener.listen() polling ─ finish ┘
 ```
 
-- On **fn-down** (flagsChanged with fn bit flipping 0→1): if `IDLE`,
-  flip to `LISTENING`, spawn a worker that calls
-  `listener.listen(silence_duration=3600)`. The big silence window is
-  intentional — we never want VAD to auto-stop; the caller decides
-  when to stop.
-- On **fn-up** (flagsChanged with fn bit flipping 1→0): if
-  `LISTENING`, flip to `TRANSCRIBING`, call `listener.finish()`. The
-  worker's poll loop exits, audio is transcribed, hallucinations are
-  filtered, text is injected.
-- Worker drops back to `IDLE` when done.
+- On **fn-down** (flagsChanged, keycode 63, fn bit flipping 0→1): if
+  `IDLE`, flip to `LISTENING`, `begin_turn()`, spawn a capture worker
+  that calls `listener.capture(silence_duration=3600)`. The big
+  silence window is intentional — VAD never auto-stops; the caller
+  decides when to stop.
+- On **fn-up** (keycode 63, fn bit 1→0): if `LISTENING`, flip to
+  `TRANSCRIBING`, call `listener.finish()`.
+- The capture worker queues the PCM on a FIFO **tx queue** and drops
+  state back to `IDLE` immediately — a single consumer thread
+  transcribes + injects in spoken order, so a slow transcription can
+  never swallow the next press. If capture hit its 120 s segment cap
+  while fn is still held, the worker loops straight into a fresh
+  capture: marathon holds stream out in segments, nothing lost.
+
+The keycode-63 filter matters: arrow/Home/End/PgUp/PgDn/forward-delete
+and F-keys ALSO toggle the fn *flag* in flagsChanged events on Apple
+keyboards. Without the filter, holding an arrow key phantom-recorded
+ambient audio and whisper's hallucination of it got typed.
+
+Self-healing: the main loop polls `CGEventSourceFlagsState` every
+0.5 s; if fn is physically up while state is LISTENING (the tap missed
+the release — e.g. disabled mid-hold), the turn finishes ≤0.5 s late
+instead of recording to the cap and typing hallucinated ambient.
 
 Re-entrancy rules:
 - fn-down in LISTENING/TRANSCRIBING: no-op.
 - fn-up in IDLE/TRANSCRIBING: no-op.
+- Quick tap (fn-up delivered before the worker reaches capture): a
+  finish-requested flag aborts that capture instantly; `begin_turn()`
+  at fn-down keeps the flag from leaking into the next turn.
 - The callback only acts on **edges** (`fn_on != _fn_was_on`), so
   flagsChanged events from other modifiers (shift, ctrl, option) don't
   trigger anything.
@@ -86,12 +103,20 @@ input flood), the callback receives `kCGEventTapDisabledByTimeout` /
 ### 2. mutter/stt.py
 
 Mic → VAD → whisper-service IPC. Contains:
-- `Listener` — `listen()` records frames into a buffer until VAD or
-  `finish()` stops it, then hands the int16 PCM to `WhisperClient.transcribe()`.
+- `Listener` — `capture()` records frames until VAD, the 120 s cap or
+  `finish()` stops it and returns int16 PCM; `transcribe()` hands PCM
+  to `WhisperClient.transcribe()` and never raises (a failed clip is
+  persisted to `~/.mutter/pending/*.wav` + user notification).
+- Acoustic speech gate — a capture is transcribed only if the VAD
+  confirmed speech OR ≥3 50 ms blocks cleared the RMS threshold.
+  True silence never reaches whisper (whisper hallucinates on it).
+- `collapse_repeats()` — bounds whisper's repeat-loop pathology
+  ("Thank you." ×500) to one instance, any phrase, any period ≤8
+  words. Replaces the old phrase blacklist, which ate deliberate
+  short dictations ("okay", "thank you").
 - `_VadState` — pure time-parameterised VAD. With `silence_duration`
   set very high (3600 s) the daemon never relies on auto-stop; `finish()`
   on fn-release is what ends the turn.
-- `is_hallucination()` — filters "thank you", "subscribe", "you", etc.
 - `MIN_CAPTURED_SEC` — drops clips shorter than 0.3 s.
 
 ### 2b. mutter/whisper_client.py
@@ -153,9 +178,17 @@ the service (~few ms if it's up; up to 180 s wait if it's still warming).
 - **Double fn-down** (while already LISTENING): state-machine no-op.
 - **Non-fn flagsChanged events** (shift, ctrl, option, caps): ignored
   because the fn bit didn't change.
-- **Short tap of fn** (<300 ms): `MIN_CAPTURED_SEC` drops clip.
-- **Silent hold** (fn held but no speech): `is_hallucination` catches
-  "thank you", "you", etc.
+- **Short tap of fn** (<300 ms): `MIN_CAPTURED_SEC` drops clip; if the
+  tap beats the worker to `capture()`, the finish-requested flag aborts
+  cleanly (used to wedge the daemon for up to 120 s).
+- **Silent hold** (fn held but no speech): zero speech evidence → the
+  clip never reaches whisper at all.
+- **Whisper service down mid-dictation**: clip saved to
+  `~/.mutter/pending/`, notification shown — speech never lost.
+- **Typing fails** (injection error): transcript lands on the
+  clipboard via pbcopy + notification.
+- **Hold >120 s**: capture loops in segments; text streams out while
+  the hold continues.
 - **Transcript contains `\n`**: sanitizer replaces with space.
 - **Long transcript**: pynput types chars one-by-one; no length limit.
 - **Special chars / unicode / emoji**: CGEventKeyboardSetUnicodeString
@@ -168,12 +201,10 @@ the service (~few ms if it's up; up to 180 s wait if it's still warming).
 1. **macOS built-in dictation must be disabled** (System Settings →
    Keyboard → Dictation → Off). Otherwise fn can fire Apple's
    dictation simultaneously.
-2. **fn+F-key combos record a brief empty clip**. Harmless (filtered
-   out) but does mean the mic turns on for ~100 ms during, e.g., a
-   brightness-up press.
-3. **Transcribe blocks the worker thread** (100–300 ms). A second
-   fn-tap during transcribe is ignored. Fine for human-scale typing.
-4. **Release-to-text gap**. If you release fn and start typing on the
+2. **fn+F-key combos record a brief empty clip**. Harmless (no speech
+   evidence → dropped before whisper) but the mic turns on for ~100 ms
+   during, e.g., a brightness-up press.
+3. **Release-to-text gap**. If you release fn and start typing on the
    keyboard immediately, typed chars and dictated chars interleave.
    Wait ~250 ms for the dictation to land before touching the
    keyboard again.

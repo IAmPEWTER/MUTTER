@@ -342,6 +342,7 @@ class MutterDaemon:
         self._tap_loop = None
         self._tap_thread: Optional[threading.Thread] = None
         self._fn_was_on = False
+        self._fn_off_polls = 0  # consecutive reconciler polls with fn up
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -525,8 +526,10 @@ class MutterDaemon:
         (timeout / user-input flood) the release event is lost; without
         this we'd record ambient audio until the 120 s cap and then type
         whisper's hallucination of it ("Thank you." x500). Poll the real
-        hardware flag state; fn physically up while we think we're
-        LISTENING → finish the turn now (≤0.5 s late)."""
+        hardware flag state; fn physically up on two consecutive polls
+        while we think we're LISTENING → finish the turn (≤1 s late).
+        The debounce keeps a single transient misread from ever cutting
+        a live dictation short."""
         try:
             flags = Quartz.CGEventSourceFlagsState(
                 Quartz.kCGEventSourceStateHIDSystemState
@@ -534,9 +537,11 @@ class MutterDaemon:
         except Exception:
             return
         if flags & Quartz.kCGEventFlagMaskSecondaryFn:
+            self._fn_off_polls = 0
             return
+        self._fn_off_polls += 1
         self._fn_was_on = False  # heal edge desync even when IDLE
-        if self.state == STATE_LISTENING:
+        if self.state == STATE_LISTENING and self._fn_off_polls >= 2:
             print("mutter: missed fn-up healed by reconciler", file=sys.stderr)
             self._on_fn_up()
 

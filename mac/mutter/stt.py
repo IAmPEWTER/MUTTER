@@ -178,6 +178,11 @@ def collapse_repeats(text: str, min_repeats: int = 4, max_period: int = 8) -> st
 
 _PENDING_DIR = Path.home() / ".mutter" / "pending"
 
+# Uniqueness suffix: queued segments can fail within the same second
+# (service down -> instant connection errors), and a timestamp-only
+# name would overwrite earlier clips.
+_pending_seq = iter(range(1, 1_000_000))
+
 
 def notify_user(message: str) -> None:
     """Best-effort macOS notification banner. Never raises, never blocks."""
@@ -203,7 +208,8 @@ def _persist_pending_audio(audio: Any, sample_rate: int) -> Optional[Path]:
     try:
         import wave
         _PENDING_DIR.mkdir(parents=True, exist_ok=True)
-        path = _PENDING_DIR / time.strftime("%Y%m%d-%H%M%S.wav")
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = _PENDING_DIR / f"{stamp}-{next(_pending_seq):06d}.wav"
         with wave.open(str(path), "wb") as w:
             w.setnchannels(CHANNELS)
             w.setsampwidth(SAMPLE_WIDTH)

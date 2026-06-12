@@ -78,17 +78,20 @@ android/
 │   └── src/main/
 │       ├── AndroidManifest.xml
 │       ├── kotlin/com/peter/mutter/
-│       │   ├── MutterAccessibilityService.kt   — key intercept, state machine, FG promotion
+│       │   ├── MutterAccessibilityService.kt   — key intercept, hold sessions, FG promotion
 │       │   ├── AudioRecorder.kt                — 16 kHz mono PCM capture
+│       │   ├── VadSegmenter.kt                 — Silero VAD + chunk buffering
+│       │   ├── AdaptiveEndpointer.kt           — pure chunk-cut logic
 │       │   ├── WhisperEngine.kt                — sherpa-onnx OfflineRecognizer wrapper
-│       │   ├── HallucinationFilter.kt          — port of mutter/stt.py
-│       │   ├── Sanitizer.kt                    — port of mutter/daemon.py text cleanup
-│       │   ├── EnergyGate.kt                   — silent-clip drop
-│       │   ├── TextInjector.kt                 — paste-and-restore
+│       │   ├── Sanitizer.kt                    — text cleanup + repeat-loop collapse
+│       │   ├── EnergyGate.kt                   — RMS (degraded-VAD stand-in)
+│       │   ├── PendingAudio.kt                 — failed-chunk WAV persistence
+│       │   ├── TextInjector.kt                 — paste → SET_TEXT splice → clipboard+notif
 │       │   ├── ModelDownloader.kt              — first-launch HF fetch
-│       │   ├── NotificationHelper.kt           — FG channel + notification
+│       │   ├── NotificationHelper.kt           — FG + error channels
+│       │   ├── DailyRecycler.kt                — ~5am recognizer recycle
 │       │   ├── Prefs.kt                        — intercept on/off
-│       │   ├── MutterState.kt                  — IDLE / LISTENING / TRANSCRIBING
+│       │   ├── updater/                        — GitHub Releases self-update
 │       │   ├── setup/SetupActivity.kt          — wizard
 │       │   └── settings/SettingsActivity.kt
 │       └── res/
@@ -112,24 +115,10 @@ The sherpa-onnx Android AAR (~55 MB) is **not** committed to the repo. The first
 
 Debug build is signed automatically with `~/.android/debug.keystore`. Sideloadable as-is; no Play Store, no keystore management.
 
-## Verified before phone arrival
+## Verified
 
-- 17 unit tests pass (HallucinationFilter, Sanitizer, EnergyGate edge cases).
-- Gradle build produces a 45 MB APK with arm64-v8a sherpa-onnx natives bundled.
-- Manifest declares the accessibility service with `foregroundServiceType=microphone` and `BIND_ACCESSIBILITY_SERVICE`.
-- sherpa-onnx Kotlin API binding compiles against the official v1.13.2 AAR.
-- HuggingFace model URLs respond with the expected sizes (98 MB + 186 MB + 0.8 MB).
-
-## Unverified — needs the S23
-
-- Volume-down intercept actually fires `onKeyEvent` under Samsung One UI key handling.
-- ACTION_PASTE actually inserts text in WhatsApp / Gmail / Chrome / Messages.
-- Latency on real SD8G2 CPU matches the ~175–355 ms (UP → text visible) estimate.
-- Battery / RAM behavior under daily use.
-- Volume-slider flash duration (Galaxy firmware quirk noted in spec).
-- Whether any app's anti-fraud detection blocks normal use when accessibility is enabled (banking apps may).
-
-When the phone arrives: install the APK, walk through setup, exercise the dictation in the apps you actually use, and report back what works / what breaks.
+- 35 JVM unit tests pass (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater).
+- Daily driver on Galaxy S23 (One UI): vol-down intercept, paste injection, streaming chunks.
 
 ## Uninstall
 

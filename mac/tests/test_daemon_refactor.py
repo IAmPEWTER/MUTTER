@@ -434,7 +434,9 @@ def test_tap_callback_ignores_non_fn_keycodes(monkeypatch):
 def test_reconciler_heals_missed_fn_up(monkeypatch):
     """If the tap missed the fn-up (macOS disabled it mid-hold), the
     main-loop reconciler must finish the turn once the hardware flag
-    state shows fn is physically up."""
+    state shows fn physically up on two consecutive polls — one poll
+    must NOT heal (debounce against a transient misread cutting a
+    live dictation short)."""
     dm = _new_daemon_with_fake_listener()
     dm._on_fn_down()
     assert dm.listener.listen_called.wait(timeout=1.0)
@@ -442,10 +444,12 @@ def test_reconciler_heals_missed_fn_up(monkeypatch):
 
     monkeypatch.setattr(d.Quartz, "CGEventSourceFlagsState", lambda src: 0)
     dm._reconcile_fn_state()
+    assert dm.state == d.STATE_LISTENING  # first miss: debounced
     assert dm._fn_was_on is False
+    dm._reconcile_fn_state()              # second miss: heal
     dm.listen_thread.join(timeout=2.0)
     assert dm.state == d.STATE_IDLE
-    print("ok reconciler heals missed fn-up")
+    print("ok reconciler heals missed fn-up (debounced)")
 
 
 def test_reconciler_noop_while_fn_held(monkeypatch):

@@ -82,9 +82,12 @@ keyboards. Without the filter, holding an arrow key phantom-recorded
 ambient audio and whisper's hallucination of it got typed.
 
 Self-healing: the main loop polls `CGEventSourceFlagsState` every
-0.5 s; if fn is physically up while state is LISTENING (the tap missed
-the release — e.g. disabled mid-hold), the turn finishes ≤0.5 s late
-instead of recording to the cap and typing hallucinated ambient.
+0.5 s; fn physically up on two consecutive polls while LISTENING (the
+tap missed the release — e.g. disabled mid-hold) finishes the turn
+≤1 s late instead of recording to the cap and typing hallucinated
+ambient. The debounce keeps one transient misread from cutting a live
+dictation. Note: synthetic (posted) flag events don't register in
+`CGEventSourceFlagsState`, so the reconciler can't be spoofed.
 
 Re-entrancy rules:
 - fn-down in LISTENING/TRANSCRIBING: no-op.

@@ -23,6 +23,12 @@ Acoustic evidence gates transcription (VAD/RMS-confirmed speech), then TRUST the
 ## Outcome (same day)
 All fixes shipped. Commits 8c2c8cc, c0f5719 (mac), c6c8e6c, 1e94fd0, 0df0eff, e2a39f8 (android). Mac daemon restarted live (pid 76870, ready). Android v0.5.0 released to IAmPEWTER/mutter-releases (self-updater path); user installs via Settings → Check for updates. Tests: mac 23 pass, android 35 pass. Docs synced (SDD, android design, DECISIONS ×2). User confirmed "500 thank yous" symptom pre-fix — matches missed-fn-up + forced-transcription chain; defense in depth: keycode filter + reconciler + acoustic gate + collapse_repeats.
 
+## Cleanup pass (same day)
+- Bug found in own work: mac pending-WAV name was second-resolution — fast-failing queued segments overwrote each other. Fixed with per-process sequence suffix.
+- Live phantom test against running daemon: posted flagsChanged (keycode 126 + fn flag) → daemon correctly inert (no mute, no turn). Keycode filter verified in vivo.
+- Empirical quirk: synthetic posted flag events do NOT register in `CGEventSourceFlagsState` — reconciler unspoofable, but physical-hold reading unverifiable without a finger. Hardened with 2-poll debounce (heal at ≤1 s) so one transient misread can't cut a dictation. If a real dictation ever cuts at ~1 s, err.log will show "missed fn-up healed by reconciler" — that's the diagnostic.
+- android/README.md de-staled (file tree, test counts, removed pre-phone-arrival sections).
+
 ## Notes
 - Mute logic (mac): 3 commits of regression history (3f2784a→af342bc revert). DO NOT touch.
 - Live daemon: pid in /tmp/mutter.pid, logs /tmp/mutter.{out,err}.log, mic = 'MacBook Air Microphone'.

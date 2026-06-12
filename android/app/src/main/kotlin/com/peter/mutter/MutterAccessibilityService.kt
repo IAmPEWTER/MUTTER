@@ -17,13 +17,18 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MutterAccessibilityService : AccessibilityService() {
 
     private val tag = "MutterSvc"
-    private val state = AtomicReference(MutterState.IDLE)
-    private val stateLock = Any()
+
+    // Capture-side state only: true between an accepted DOWN and its UP.
+    // Transcription + injection continue on `worker` after capturing flips
+    // false, so a NEW hold can start while the previous one is still draining
+    // — a slow transcription can never swallow a press. The FIFO worker keeps
+    // text in spoken order across holds.
+    private val capturing = AtomicBoolean(false)
 
     private var recorder: AudioRecorder? = null
     private lateinit var engine: WhisperEngine
@@ -36,11 +41,16 @@ class MutterAccessibilityService : AccessibilityService() {
     private val modelExec = Executors.newSingleThreadExecutor { r ->
         Thread(r, "MutterModelLoad").apply { isDaemon = true }
     }
-    @Volatile private var lastInputNode: AccessibilityNodeInfo? = null
-    // True once any chunk of the current hold has been injected — drives the
-    // single separating space between streamed chunks. Reset on the input thread
-    // at hold start, read/set on `worker`; @Volatile carries the reset across.
-    @Volatile private var injectedThisHold: Boolean = false
+
+    // Per-hold context. Created on the input thread at DOWN; afterwards only
+    // touched on `worker` (chunk lambdas capture it by reference, so a task
+    // always sees its own hold even after a new hold starts).
+    private class Hold(@Volatile @JvmField var targetNode: AccessibilityNodeInfo?) {
+        @JvmField var injectedAny = false
+        @JvmField val failedTexts = mutableListOf<String>()
+    }
+
+    @Volatile private var hold: Hold? = null
     private var recycleReceiver: BroadcastReceiver? = null
 
     override fun onCreate() {
@@ -51,7 +61,10 @@ class MutterAccessibilityService : AccessibilityService() {
         // transcribe and inject strictly in spoken order while capture continues.
         segmenter = VadSegmenter(
             modelPath = downloader.vadModelPath(),
-            onChunk = { chunk -> worker.execute { transcribeAndInject(chunk) } },
+            onChunk = { chunk ->
+                val h = hold
+                worker.execute { transcribeAndInject(h, chunk) }
+            },
         )
         injector = TextInjector(this)
         NotificationHelper.ensureChannel(this)
@@ -96,7 +109,7 @@ class MutterAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         Log.i(tag, "onInterrupt")
-        abortToIdle()
+        abortHold()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -109,8 +122,8 @@ class MutterAccessibilityService : AccessibilityService() {
         if (event.keyCode != KeyEvent.KEYCODE_VOLUME_DOWN) return false
         if (!Prefs.isInterceptEnabled(this)) return false
         if (event.repeatCount > 0) {
-            // Consume repeats while we're listening; pass through otherwise.
-            return state.get() == MutterState.LISTENING
+            // Consume repeats while we're capturing; pass through otherwise.
+            return capturing.get()
         }
         return when (event.action) {
             KeyEvent.ACTION_DOWN -> handleDown()
@@ -141,45 +154,54 @@ class MutterAccessibilityService : AccessibilityService() {
             Log.d(tag, "handleDown drop: no editable + ime down")
             return false
         }
+        if (!capturing.compareAndSet(false, true)) return true // swallow stray double-down
         Log.i(tag, "handleDown accept: editable=${editable != null} imeUp=$imeUp")
 
-        synchronized(stateLock) {
-            if (state.get() != MutterState.IDLE) return true // swallow stray
-            state.set(MutterState.LISTENING)
-        }
-        lastInputNode = editable  // may be null; transcribeAndInject falls back via findPasteTarget
-        injectedThisHold = false
+        // may be null; transcribeAndInject falls back via findPasteTarget
+        hold = Hold(editable)
         segmenter.reset()
-        val ok = startRecording()
-        if (!ok) {
-            synchronized(stateLock) { state.set(MutterState.IDLE) }
+        // Clipboard snapshot rides the FIFO worker so it lands after the
+        // previous hold's finish and before this hold's first chunk.
+        worker.execute { injector.begin() }
+        if (!startRecording()) {
+            capturing.set(false)
+            worker.execute { injector.finish(leftover = null) } // undo begin
             haptic(50)
             return false
         }
         promoteToForeground()
-        injector.begin() // capture clipboard once for the whole hold
         return true
     }
 
     private fun handleUp(): Boolean {
-        synchronized(stateLock) {
-            if (state.get() != MutterState.LISTENING) return false
-            state.set(MutterState.TRANSCRIBING)
-        }
+        if (!capturing.compareAndSet(true, false)) return false
         val rec = recorder
         recorder = null
         // stop() joins the capture thread, so every cut chunk has already been
         // queued. flush() then queues the final partial chunk; both land on the
-        // FIFO worker ahead of the completion marker below.
+        // FIFO worker ahead of the end-of-hold task below.
         try { rec?.stop() } catch (t: Throwable) { Log.e(tag, "stop failed", t) }
         segmenter.flush()
         demoteForeground()
 
-        worker.execute {
-            injector.finish() // restore clipboard once, after the last chunk pasted
-            synchronized(stateLock) { state.set(MutterState.IDLE) }
-        }
+        val h = hold
+        worker.execute { endHold(h) }
         return true
+    }
+
+    // Runs on `worker`, strictly after every chunk of the hold. Failed chunks
+    // go to the clipboard (instead of being clobbered by the old restore) and
+    // are surfaced via notification — a dictation is never silently lost.
+    private fun endHold(h: Hold?) {
+        val leftover = h?.failedTexts?.takeIf { it.isNotEmpty() }?.joinToString(" ")
+        injector.finish(leftover)
+        if (leftover != null) {
+            NotificationHelper.notifyError(
+                this,
+                getString(R.string.notif_inject_failed_title),
+                leftover,
+            )
+        }
     }
 
     private fun startRecording(): Boolean {
@@ -190,9 +212,9 @@ class MutterAccessibilityService : AccessibilityService() {
     }
 
     // One streamed chunk: transcribe and inject in spoken order. Runs on the
-    // single `worker` thread, so injectedThisHold is race-free and the
-    // separating space between chunks is added exactly once.
-    private fun transcribeAndInject(samples: FloatArray) {
+    // single `worker` thread; `h` is this chunk's own hold, so spacing and
+    // failure bookkeeping stay correct even if a new hold already started.
+    private fun transcribeAndInject(h: Hold?, samples: FloatArray) {
         if (!engine.isLoaded() && !engine.load()) {
             Log.e(tag, "engine load failed at transcribe time")
             persistChunk(samples)
@@ -215,13 +237,13 @@ class MutterAccessibilityService : AccessibilityService() {
         // decoder repeat-loop is bounded to one instance by collapseRepeats.
         val clean = Sanitizer.collapseRepeats(Sanitizer.sanitize(raw))
         if (clean.isEmpty()) return
-        val text = if (injectedThisHold) " $clean" else clean
-        val node = findFocusedEditable() ?: lastInputNode ?: findPasteTarget()
-        val injected = injector.inject(node, text)
-        if (injected) {
-            injectedThisHold = true
+        val text = if (h?.injectedAny == true) " $clean" else clean
+        val node = findFocusedEditable() ?: refreshedTarget(h) ?: findPasteTarget()
+        if (injector.inject(node, text)) {
+            h?.injectedAny = true
         } else {
-            Log.w(tag, "injection failed; text on clipboard")
+            Log.w(tag, "injection failed — preserving transcript for end of hold")
+            h?.failedTexts?.add(clean)
             haptic(80)
         }
     }
@@ -235,6 +257,18 @@ class MutterAccessibilityService : AccessibilityService() {
             getString(R.string.notif_transcribe_failed_title),
             getString(R.string.notif_transcribe_failed_text, f?.name ?: "pending/"),
         )
+    }
+
+    // The node captured at DOWN can go stale (focus moved, window gone);
+    // refresh() validates it before use so ACTION_PASTE doesn't fail silently.
+    private fun refreshedTarget(h: Hold?): AccessibilityNodeInfo? {
+        val node = h?.targetNode ?: return null
+        val alive = try { node.refresh() } catch (t: Throwable) { false }
+        if (!alive) {
+            h.targetNode = null
+            return null
+        }
+        return node
     }
 
     private fun findFocusedEditable(): AccessibilityNodeInfo? {
@@ -314,14 +348,13 @@ class MutterAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun abortToIdle() {
-        synchronized(stateLock) {
-            state.set(MutterState.IDLE)
-        }
+    private fun abortHold() {
+        capturing.set(false)
         try { recorder?.stop() } catch (_: Throwable) {}
         recorder = null
         segmenter.reset() // drop the in-flight hold's buffered audio
-        injector.finish() // restore clipboard if a hold was aborted
+        val h = hold
+        worker.execute { endHold(h) } // FIFO: after any already-queued chunks
         demoteForeground()
     }
 
@@ -345,14 +378,13 @@ class MutterAccessibilityService : AccessibilityService() {
 
     // Daily ~5am: tear down and rebuild the native recognizer to bound heap
     // growth, then re-warm. Runs on modelExec so it serializes with the initial
-    // load (no races), and only when idle so it can never interrupt a live
-    // dictation. If a transcription starts mid-reload, transcribeAndInject's
-    // own isLoaded() check reloads on demand — so worst case is a brief delay,
-    // never lost audio.
+    // load, and only when not capturing. transcribe/release are synchronized on
+    // the engine, so even a drain racing the recycle is memory-safe — worst
+    // case a queued chunk reloads on demand. Never lost audio.
     private fun recycleEngine() {
         modelExec.execute {
-            if (state.get() != MutterState.IDLE) {
-                Log.i(tag, "daily recycle skipped — not idle")
+            if (capturing.get()) {
+                Log.i(tag, "daily recycle skipped — capturing")
                 return@execute
             }
             if (!downloader.isPresent()) return@execute

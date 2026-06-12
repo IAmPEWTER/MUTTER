@@ -59,11 +59,18 @@ STATE_IDLE = "idle"
 STATE_LISTENING = "listening"
 STATE_TRANSCRIBING = "transcribing"
 
-# Hard ceiling on one turn (capture + transcribe + inject): 120 s
-# capture cap from listen() + 60 s grace for transcribe and slow
-# Screen-Sharing injection. Overrun = wedged audio worker (PortAudio
-# teardown deadlock); main loop os._exit(1)s for launchd to respawn.
+# Hard ceiling on one capture segment (120 s cap from capture() + 60 s
+# grace). Overrun = wedged audio worker (PortAudio teardown deadlock);
+# main loop os._exit(1)s for launchd to respawn. Re-armed per segment
+# for marathon holds.
 _TURN_DEADLINE_SEC = 180.0
+
+# kVK_Function — the physical fn/🌐 key. flagsChanged events for
+# arrow/Home/End/PgUp/PgDn/forward-delete/F-keys ALSO toggle the fn
+# *flag* on Apple keyboards; only events carrying this keycode are a
+# real fn press. Without this filter, holding an arrow key phantom-
+# records ambient audio and whisper hallucinates text from it.
+_KEYCODE_FN = 63
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +443,13 @@ class MutterDaemon:
             return event
         if event_type == Quartz.kCGEventFlagsChanged:
             try:
+                keycode = Quartz.CGEventGetIntegerValueField(
+                    event, Quartz.kCGKeyboardEventKeycode
+                )
                 flags = Quartz.CGEventGetFlags(event)
             except Exception:
+                return event
+            if keycode != _KEYCODE_FN:
                 return event
             fn_on = bool(flags & Quartz.kCGEventFlagMaskSecondaryFn)
             if fn_on != self._fn_was_on:
@@ -475,6 +487,26 @@ class MutterDaemon:
             self.listener.finish()
         except Exception as e:
             print(f"mutter: finish error: {e}", file=sys.stderr)
+
+    def _reconcile_fn_state(self) -> None:
+        """Self-heal a missed fn-up. If macOS disables the tap mid-hold
+        (timeout / user-input flood) the release event is lost; without
+        this we'd record ambient audio until the 120 s cap and then type
+        whisper's hallucination of it ("Thank you." x500). Poll the real
+        hardware flag state; fn physically up while we think we're
+        LISTENING → finish the turn now (≤0.5 s late)."""
+        try:
+            flags = Quartz.CGEventSourceFlagsState(
+                Quartz.kCGEventSourceStateHIDSystemState
+            )
+        except Exception:
+            return
+        if flags & Quartz.kCGEventFlagMaskSecondaryFn:
+            return
+        self._fn_was_on = False  # heal edge desync even when IDLE
+        if self.state == STATE_LISTENING:
+            print("mutter: missed fn-up healed by reconciler", file=sys.stderr)
+            self._on_fn_up()
 
     # ------------------------------------------------------------------
     # Worker — runs the listen/transcribe/inject pipeline so the tap
@@ -557,6 +589,7 @@ class MutterDaemon:
                         flush=True,
                     )
                     os._exit(1)
+                self._reconcile_fn_state()
                 time.sleep(0.5)
         finally:
             self._stop_event_tap()

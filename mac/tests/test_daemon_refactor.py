@@ -33,6 +33,12 @@ def tmp_pidfile(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def _no_system_mute(monkeypatch):
+    """Keep test runs from toggling the real system mute via osascript."""
+    monkeypatch.setattr(d, "_set_system_muted", lambda muted: None)
+
+
 # ---------------------------------------------------------------------------
 # Sanitizer
 # ---------------------------------------------------------------------------
@@ -307,6 +313,67 @@ def test_fn_transition_logic():
     assert fn_on is True
     assert fn_on == dm._fn_was_on  # no edge — fn is still on
     print("ok fn-flag transition detection")
+
+
+def test_tap_callback_ignores_non_fn_keycodes(monkeypatch):
+    """Arrow/nav/F-keys also toggle the fn FLAG in their flagsChanged
+    events on Apple keyboards. Only keycode 63 (the physical fn key)
+    may start or stop dictation — otherwise holding an arrow key
+    phantom-records ambient audio and whisper hallucinates from it."""
+    dm = _new_daemon_with_fake_listener()
+    fake = {"keycode": 126, "flags": 0x800000}  # up-arrow carrying fn flag
+    monkeypatch.setattr(
+        d.Quartz, "CGEventGetIntegerValueField", lambda ev, f: fake["keycode"]
+    )
+    monkeypatch.setattr(d.Quartz, "CGEventGetFlags", lambda ev: fake["flags"])
+
+    dm._tap_callback(None, d.Quartz.kCGEventFlagsChanged, object(), None)
+    assert dm.state == d.STATE_IDLE  # phantom ignored
+
+    fake["keycode"] = 63  # the real fn key
+    dm._tap_callback(None, d.Quartz.kCGEventFlagsChanged, object(), None)
+    assert dm.state == d.STATE_LISTENING
+    assert dm.listener.listen_called.wait(timeout=1.0)
+
+    fake["flags"] = 0  # fn released
+    dm._tap_callback(None, d.Quartz.kCGEventFlagsChanged, object(), None)
+    dm.listen_thread.join(timeout=2.0)
+    assert dm.state == d.STATE_IDLE
+    print("ok non-fn keycodes ignored")
+
+
+def test_reconciler_heals_missed_fn_up(monkeypatch):
+    """If the tap missed the fn-up (macOS disabled it mid-hold), the
+    main-loop reconciler must finish the turn once the hardware flag
+    state shows fn is physically up."""
+    dm = _new_daemon_with_fake_listener()
+    dm._on_fn_down()
+    assert dm.listener.listen_called.wait(timeout=1.0)
+    dm._fn_was_on = True
+
+    monkeypatch.setattr(d.Quartz, "CGEventSourceFlagsState", lambda src: 0)
+    dm._reconcile_fn_state()
+    assert dm._fn_was_on is False
+    dm.listen_thread.join(timeout=2.0)
+    assert dm.state == d.STATE_IDLE
+    print("ok reconciler heals missed fn-up")
+
+
+def test_reconciler_noop_while_fn_held(monkeypatch):
+    dm = _new_daemon_with_fake_listener()
+    dm._on_fn_down()
+    assert dm.listener.listen_called.wait(timeout=1.0)
+    dm._fn_was_on = True
+
+    monkeypatch.setattr(
+        d.Quartz, "CGEventSourceFlagsState", lambda src: 0x800000
+    )
+    dm._reconcile_fn_state()
+    assert dm.state == d.STATE_LISTENING
+    assert dm._fn_was_on is True
+    dm._on_fn_up()
+    dm.listen_thread.join(timeout=2.0)
+    print("ok reconciler no-op while fn held")
 
 
 # ---------------------------------------------------------------------------

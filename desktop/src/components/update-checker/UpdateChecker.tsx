@@ -3,7 +3,6 @@ import { useTranslation } from "react-i18next";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { listen } from "@tauri-apps/api/event";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { ProgressBar } from "../shared";
 import { useSettings } from "../../hooks/useSettings";
 import { commands } from "../../bindings";
@@ -201,9 +200,8 @@ const UpdateChecker: React.FC<UpdateCheckerProps> = ({ className = "" }) => {
                 {t("common.close")}
               </button>
               <button
-                className="px-3 py-1.5 text-sm rounded bg-logo-primary text-white hover:bg-logo-primary/80 transition-colors"
+                className="px-3 py-1.5 text-sm rounded bg-background-ui text-white hover:bg-background-ui/80 transition-colors"
                 onClick={() => {
-                  openUrl("https://github.com/cjpais/Handy/releases/latest");
                   setShowPortableUpdateDialog(false);
                 }}
               >

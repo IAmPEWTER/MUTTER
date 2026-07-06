@@ -30,12 +30,17 @@ Discipline (spec §5): custom logic in NEW files upstream never touches; edits t
 - `tauri.conf.json`: productName MUTTER, identifier `com.peter.mutter.app`, `createUpdaterArtifacts:false`, no `updater` plugin block.
 - `capabilities/*.json`: `updater:default` permission removed.
 - Icons regenerated from `../docs/logo.png`; `index.html` title; `tray.rs` label; i18n "Handy"→"MUTTER" brand strings.
-- Internal identifiers (crate `handy_app_lib`, `handy` binary, `handy-keys`, URLs, HF cache paths) left as Handy — deep rename = merge pain for zero user benefit.
+- `MutterLogo.tsx` (new file, traced stacked wordmark) replaces `HandyTextLogo`/`HandyHand` in `Sidebar.tsx`, `Onboarding.tsx`, `AccessibilityOnboarding.tsx`; sidebar nav icon for the dictation section is lucide `Mic` (stacked mark illegible at nav-icon size).
+- `theme.css`: MUTTER navy/white monochrome (`#080514` / `#fefefe`) replaces Handy's pink palette, same variable names. `--color-logo-primary`/`--color-background-ui` flip light↔dark (navy-on-white in light mode, white-on-navy in dark). Two spots needed an explicit text-color flip because they render the token as a solid full-opacity fill with plain ambient/hardcoded text: `Sidebar.tsx` active-item pill (`text-white dark:text-[#080514]`) and `Badge.tsx` `primary` variant (same pair). `AccessibilityOnboarding.tsx` grant buttons and `UpdateChecker.tsx`'s install button were switched from `bg-logo-primary` to `bg-background-ui` (always dark in both themes) since they hardcode `text-white`.
+- `AboutSettings.tsx`: donate link + `github.com/cjpais/Handy` source link removed (MUTTER is private, not soliciting).
+- `DebugPaths.tsx`: example paths now real macOS paths (`~/Library/Application Support/com.peter.mutter.app/...`), not Windows `%APPDATA%/handy`.
+- `release-notes/0.9.0.md`: rewritten, no Handy references or cjpais/Handy issue links.
+- Internal identifiers (crate `handy_app_lib`, `handy` binary, `handy-keys`, `handy_keys` enum value/bindings, URLs, HF cache paths) left as Handy — deep rename = merge pain for zero user benefit.
 - **Auto-updater is disabled on purpose** — it would overwrite this vendored tree with upstream releases. Keep it dead across merges.
 
 ## Known cosmetic gaps (deferred, non-blocking)
-- Sidebar + onboarding still render Handy's SVG wordmark (`HandyTextLogo.tsx` / `HandyHand.tsx`) — vector art, not a string swap. Redraw when convenient.
-- `resources/handy.png` (Linux tray), `DebugPaths.tsx` example paths, `cli.rs` `--help` name still say "handy" — non-user-facing or Linux-only.
+- `resources/handy.png` (Linux tray icon) still says "handy" — Linux-only, not built/shipped for macOS.
+- `cli.rs` binary/program name (`#[command(name = "handy", ...)]`) intentionally left as `handy` — only the `about` help text was changed to MUTTER; renaming risks the single-instance/CLI plumbing for no user-visible benefit (never seen outside `--help`).
 
 ## Smoke test after every merge (spec §5)
 1. fn-hold triggers recording (`scripts/smoke/fn_trigger_smoke.sh`).

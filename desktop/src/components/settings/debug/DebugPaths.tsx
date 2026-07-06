@@ -26,7 +26,9 @@ export const DebugPaths: React.FC<DebugPathsProps> = ({
             {t("settings.debug.paths.appData")}
           </span>{" "}
           {/* eslint-disable-next-line i18next/no-literal-string */}
-          <span className="font-mono text-xs select-text">%APPDATA%/handy</span>
+          <span className="font-mono text-xs select-text">
+            ~/Library/Application Support/com.peter.mutter.app
+          </span>
         </div>
         <div>
           <span className="font-medium">
@@ -34,7 +36,7 @@ export const DebugPaths: React.FC<DebugPathsProps> = ({
           </span>{" "}
           {/* eslint-disable-next-line i18next/no-literal-string */}
           <span className="font-mono text-xs select-text">
-            %APPDATA%/handy/models
+            ~/Library/Application Support/com.peter.mutter.app/models
           </span>
         </div>
         <div>
@@ -43,7 +45,7 @@ export const DebugPaths: React.FC<DebugPathsProps> = ({
           </span>{" "}
           {/* eslint-disable-next-line i18next/no-literal-string */}
           <span className="font-mono text-xs select-text">
-            %APPDATA%/handy/settings_store.json
+            ~/Library/Application Support/com.peter.mutter.app/settings_store.json
           </span>
         </div>
       </div>

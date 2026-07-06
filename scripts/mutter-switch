@@ -1,0 +1,34 @@
+#!/bin/bash
+# mutter-switch — flip fn/globe dictation ownership between the two MUTTER backends.
+# Only ONE may run: both bind fn (keycode 63); two listeners = double-fire.
+#   app     -> new native app (desktop/, com.peter.mutter.app)
+#   python  -> legacy python daemon (mac/, com.peter.mutter)
+#   status  -> show who owns fn
+# Soak default = app. Fallback during soak = python.
+set -euo pipefail
+UID_=$(id -u)
+PY_PLIST="$HOME/Library/LaunchAgents/com.peter.mutter.plist"
+APP="/Applications/MUTTER.app"
+
+py_loaded(){ launchctl list 2>/dev/null | grep -q "com.peter.mutter$"; }
+app_running(){ pgrep -f "MUTTER.app/Contents/MacOS/handy" >/dev/null 2>&1; }
+
+stop_python(){ py_loaded && launchctl bootout "gui/$UID_/com.peter.mutter" 2>/dev/null || true; }
+start_python(){ [ -f "$PY_PLIST" ] && launchctl bootstrap "gui/$UID_" "$PY_PLIST" 2>/dev/null || \
+  { echo "python plist missing at $PY_PLIST"; exit 1; }; }
+stop_app(){ osascript -e 'quit app "MUTTER"' 2>/dev/null || true; sleep 1; }
+start_app(){ [ -d "$APP" ] && open -ga "$APP" || { echo "app missing at $APP"; exit 1; }; }
+
+case "${1:-status}" in
+  app)
+    stop_python; stop_app; start_app
+    echo "→ fn owned by MUTTER.app (native). python daemon stopped." ;;
+  python)
+    stop_app; stop_python; start_python
+    echo "→ fn owned by python daemon. MUTTER.app quit." ;;
+  status)
+    echo "app running : $(app_running && echo yes || echo no)"
+    echo "python loaded: $(py_loaded && echo yes || echo no)"
+    if app_running && py_loaded; then echo "⚠ BOTH own fn — run 'mutter-switch app' or 'python' to fix"; fi ;;
+  *) echo "usage: mutter-switch {app|python|status}"; exit 1 ;;
+esac

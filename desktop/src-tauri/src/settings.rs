@@ -467,7 +467,9 @@ fn default_autostart_enabled() -> bool {
 }
 
 fn default_update_checks_enabled() -> bool {
-    true
+    // MUTTER is a vendored fork with the updater plugin unregistered (see lib.rs);
+    // default this off so the UI never offers/attempts a check against upstream Handy.
+    false
 }
 
 fn default_show_whats_new_on_update() -> bool {

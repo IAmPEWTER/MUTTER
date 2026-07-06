@@ -1,6 +1,7 @@
 use super::model_capabilities::{
     CapabilityProbe, CapabilityProber, Compatibility, GgufHeaderProber,
 };
+use super::remote_socket;
 use crate::settings::{get_settings, write_settings};
 use anyhow::Result;
 use flate2::read::GzDecoder;
@@ -35,6 +36,10 @@ pub enum EngineType {
     GigaAM,
     Canary,
     Cohere,
+    /// Delegates transcription to an external, already-warm MLX-whisper
+    /// daemon over a unix socket instead of loading local weights. See
+    /// `remote_socket.rs`.
+    RemoteSocket,
 }
 
 /// Where a model comes from and how Handy obtains it — the routing discriminant
@@ -1046,6 +1051,15 @@ impl ModelManager {
             },
         );
 
+        // RemoteSocket pseudo-model: no local weights, so it's registered
+        // directly rather than going through the download-table shape above.
+        // See remote_socket.rs for the full definition + why it's always
+        // `is_downloaded: true`.
+        available_models.insert(
+            remote_socket::MODEL_ID.to_string(),
+            remote_socket::pseudo_model_info(),
+        );
+
         // Seed the bundled offline catalog before the on-disk scans, so a model
         // already in the HF cache dedups onto its richer catalog entry (the scans
         // only insert ids not already present) instead of showing as a bare cache
@@ -1306,6 +1320,12 @@ impl ModelManager {
         let mut models = self.available_models.lock().unwrap();
 
         for model in models.values_mut() {
+            // RemoteSocket pseudo-model has no on-disk file by design (it
+            // transcribes out-of-process via the daemon) — skip the disk scan
+            // so it's never marked "not downloaded".
+            if model.id == remote_socket::MODEL_ID {
+                continue;
+            }
             if let ModelSource::HuggingFace { repo_id, revision } = &model.source {
                 model.is_downloaded = hf_cached_path(repo_id, revision, &model.filename).is_some();
                 model.is_downloading = false;
@@ -2268,6 +2288,12 @@ impl ModelManager {
     }
 
     pub fn get_model_path(&self, model_id: &str) -> Result<PathBuf> {
+        // RemoteSocket pseudo-model has no on-disk file; its load_model arm
+        // never uses the returned path, it just needs this call to succeed.
+        if model_id == remote_socket::MODEL_ID {
+            return Ok(PathBuf::new());
+        }
+
         let model_info = self
             .get_model_info(model_id)
             .ok_or_else(|| anyhow::anyhow!("Model not found: {}", model_id))?;

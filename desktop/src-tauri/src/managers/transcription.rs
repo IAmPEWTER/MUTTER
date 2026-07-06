@@ -1,6 +1,7 @@
 use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::model::{EngineType, ModelManager};
+use crate::managers::remote_socket::{self, RemoteSocketClient};
 use crate::settings::{
     get_settings, AppSettings, ModelUnloadTimeout, OrtAcceleratorSetting,
     TranscribeAcceleratorSetting,
@@ -168,6 +169,9 @@ enum LoadedEngine {
     GigaAM(GigaAMModel),
     Canary(CanaryModel),
     Cohere(CohereModel),
+    /// Delegates to the external MLX-whisper daemon; holds no local weights.
+    /// See `remote_socket.rs`.
+    RemoteSocket(RemoteSocketClient),
 }
 
 /// RAII guard that clears the `is_loading` flag and notifies waiters on drop.
@@ -650,6 +654,18 @@ impl TranscriptionManager {
                     anyhow::anyhow!(error_msg)
                 })?;
                 LoadedEngine::Cohere(engine)
+            }
+            EngineType::RemoteSocket => {
+                // No local weights to load — construct the client and ping
+                // the daemon so a dead/unreachable service surfaces here as a
+                // load error, not a mid-dictation failure.
+                let client = RemoteSocketClient::new();
+                client.ping().map_err(|e| {
+                    let error_msg = format!("Remote whisper service unreachable: {}", e);
+                    emit_loading_failed(&error_msg);
+                    anyhow::anyhow!(error_msg)
+                })?;
+                LoadedEngine::RemoteSocket(client)
             }
         };
 
@@ -1332,6 +1348,14 @@ impl TranscriptionManager {
                             .transcribe(&audio, &options)
                             .map(|r| r.text)
                             .map_err(|e| anyhow::anyhow!("Cohere transcription failed: {}", e))
+                    }
+                    LoadedEngine::RemoteSocket(client) => {
+                        let language = remote_socket::resolve_language(&validated_language);
+                        client
+                            .transcribe(&audio, 16_000, language.as_deref())
+                            .map_err(|e| {
+                                anyhow::anyhow!("Remote whisper transcription failed: {}", e)
+                            })
                     }
                 }
             }));

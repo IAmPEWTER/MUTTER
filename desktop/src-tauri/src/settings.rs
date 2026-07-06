@@ -438,6 +438,12 @@ pub struct AppSettings {
     /// `overlay_position` (position `none` → style `None`).
     #[serde(default = "default_overlay_style")]
     pub overlay_style: OverlayStyle,
+    /// Hard cap on a single recording, in seconds, in case a key-up is missed
+    /// (e.g. a dropped keyboard event). Backend-only: no settings UI exposes
+    /// this. When exceeded, the coordinator stops+transcribes exactly as if
+    /// the user had released the key.
+    #[serde(default = "default_max_recording_secs")]
+    pub max_recording_secs: u64,
 }
 
 fn default_model() -> String {
@@ -517,6 +523,10 @@ fn default_word_correction_threshold() -> f64 {
 
 fn default_paste_delay_ms() -> u64 {
     60
+}
+
+fn default_max_recording_secs() -> u64 {
+    120
 }
 
 fn default_auto_submit() -> bool {
@@ -856,6 +866,7 @@ pub fn get_default_settings() -> AppSettings {
         extra_recording_buffer_ms: 0,
         vad_enabled: default_vad_enabled(),
         overlay_style: default_overlay_style(),
+        max_recording_secs: default_max_recording_secs(),
     }
 }
 

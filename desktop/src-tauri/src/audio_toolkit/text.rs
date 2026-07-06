@@ -270,11 +270,72 @@ fn collapse_stutters(text: &str) -> String {
     result.join(" ")
 }
 
+/// Collapses repeated multi-word phrases (2-6 words, 3+ consecutive
+/// repetitions) down to a single occurrence. Complements `collapse_stutters`
+/// (single-word only) for Whisper hallucinations that repeat a whole phrase,
+/// e.g. "thank you. thank you. thank you." -> "thank you.".
+///
+/// Matching is exact — case- and punctuation-sensitive — rather than
+/// normalized like `collapse_stutters`. This is the safest choice: two
+/// occurrences that only *look* like a repeat ("Thank you." vs "thank you.")
+/// may carry a real difference (e.g. sentence-initial capitalization) that
+/// shouldn't be silently discarded. Phrase length is tried shortest-first
+/// (2 words up to `MAX_PHRASE_WORDS`): the shortest period that repeats 3+
+/// times is the true repeating unit, and collapsing at that length is what
+/// reduces the run down to exactly one occurrence. Trying longest-first
+/// would instead find "super-periods" (e.g. two turns of a 3-word unit
+/// glued into a 6-word window that itself repeats) and under-collapse —
+/// e.g. "a b c" x6 would wrongly settle for "a b c a b c" instead of "a b c".
+fn collapse_phrase_repeats(text: &str) -> String {
+    const MAX_PHRASE_WORDS: usize = 6;
+
+    let words: Vec<&str> = text.split_whitespace().collect();
+    // Smallest collapsible case is a 2-word phrase repeated 3x = 6 tokens.
+    if words.len() < 6 {
+        return text.to_string();
+    }
+
+    let mut result: Vec<&str> = Vec::new();
+    let mut i = 0;
+
+    while i < words.len() {
+        let mut collapsed = false;
+        let max_n = MAX_PHRASE_WORDS.min((words.len() - i) / 3);
+
+        // Try phrase lengths shortest (2) to longest (6) first, so the true
+        // (minimal) repeating period is found rather than a coarser multiple of it.
+        for n in 2..=max_n {
+            let phrase = &words[i..i + n];
+            let mut reps = 1;
+            while i + (reps + 1) * n <= words.len()
+                && &words[i + reps * n..i + (reps + 1) * n] == phrase
+            {
+                reps += 1;
+            }
+
+            if reps >= 3 {
+                result.extend_from_slice(phrase);
+                i += reps * n;
+                collapsed = true;
+                break;
+            }
+        }
+
+        if !collapsed {
+            result.push(words[i]);
+            i += 1;
+        }
+    }
+
+    result.join(" ")
+}
+
 /// Filters transcription output by removing filler words and stutter artifacts.
 ///
 /// This function cleans up raw transcription text by:
 /// 1. Removing filler words based on the app language (or custom list)
-/// 2. Collapsing repeated word stutters (e.g., "wh wh wh" -> "wh")
+/// 2. Collapsing repeated word stutters (e.g., "wh wh wh" -> "wh") and
+///    repeated multi-word phrases (e.g., "thank you. thank you. thank you." -> "thank you.")
 /// 3. Cleaning up excess whitespace
 ///
 /// # Arguments
@@ -311,6 +372,11 @@ pub fn filter_transcription_output(
 
     // Collapse repeated 1-2 letter words (stutter artifacts like "wh wh wh wh")
     filtered = collapse_stutters(&filtered);
+
+    // Collapse repeated multi-word phrases (e.g. "thank you. thank you. thank you.").
+    // Runs after collapse_stutters so a degenerate single-word run (e.g. "a a a a a a")
+    // is already reduced to one word before phrase matching ever sees it.
+    filtered = collapse_phrase_repeats(&filtered);
 
     // Clean up multiple spaces to single space
     filtered = MULTI_SPACE_PATTERN.replace_all(&filtered, " ").to_string();
@@ -548,6 +614,123 @@ mod tests {
         let custom_words = vec!["MacBook Pro".to_string()];
         let result = apply_custom_words(text, &custom_words, 0.5);
         assert!(result.contains("MacBook"));
+    }
+
+    // ---------- collapse_phrase_repeats ---------------------------------- //
+
+    #[test]
+    fn test_phrase_collapse_two_word_phrase() {
+        let text = "thank you. thank you. thank you.";
+        let result = filter_transcription_output(text, "en", &None);
+        assert_eq!(result, "thank you.");
+    }
+
+    #[test]
+    fn test_phrase_collapse_three_word_phrase() {
+        let text = "I think so. I think so. I think so. Let's go.";
+        let result = filter_transcription_output(text, "en", &None);
+        assert_eq!(result, "I think so. Let's go.");
+    }
+
+    #[test]
+    fn test_phrase_collapse_five_word_phrase() {
+        let text = "please see the attached document please see the attached document please see the attached document";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, "please see the attached document");
+    }
+
+    #[test]
+    fn test_phrase_collapse_six_word_phrase_max_length() {
+        // Exercises the upper bound of the supported phrase length (6 words),
+        // with no shorter sub-period that would also satisfy 3+ repetitions.
+        let text = "please kindly see the attached document please kindly see the attached document please kindly see the attached document";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, "please kindly see the attached document");
+    }
+
+    #[test]
+    fn test_phrase_collapse_four_word_phrase_four_repetitions() {
+        // 4+ repetitions should still collapse to a single occurrence.
+        let text = "check the logs now check the logs now check the logs now check the logs now";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, "check the logs now");
+    }
+
+    #[test]
+    fn test_phrase_collapse_single_word_behavior_unregressed() {
+        // Pre-existing collapse_stutters behavior must be unaffected by the
+        // new phrase-level pass.
+        let text = "w wh wh wh wh wh wh wh wh wh why";
+        let result = filter_transcription_output(text, "en", &None);
+        assert_eq!(result, "w wh why");
+    }
+
+    #[test]
+    fn test_phrase_collapse_preserves_two_repetitions() {
+        // Legitimate repetition below the 3x threshold must survive untouched.
+        let text = "thank you. thank you. that's all.";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_phrase_collapse_case_variant_not_collapsed() {
+        // Matching is exact (case-sensitive) by design — the safest choice,
+        // since case differences (e.g. sentence-initial capitalization) may
+        // be meaningful. A case-varying "repeat" is left untouched.
+        let text = "Thank you. Thank you. thank you.";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_phrase_collapse_punctuation_variant_not_collapsed() {
+        // Same rationale: punctuation differences break the exact match.
+        let text = "thank you thank you, thank you.";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_phrase_collapse_no_false_positive_on_normal_text() {
+        let text = "This is a completely normal sentence with no repeats at all.";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_phrase_collapse_degenerate_single_word_run_not_double_counted() {
+        // "a a a a a a" could be misread as phrase-length-2 ("a a" x3), but
+        // collapse_stutters runs first in filter_transcription_output and
+        // already reduces this to a single "a" before phrase matching sees it.
+        let text = "a a a a a a";
+        let result = filter_transcription_output(text, "en", &None);
+        assert_eq!(result, "a");
+    }
+
+    #[test]
+    fn test_phrase_collapse_finds_minimal_period_not_a_coarser_multiple() {
+        // "a b c" repeats 6 times. A 6-word window ("a b c a b c") also
+        // technically repeats 3x here, but preferring the shortest period
+        // (3 words) is what fully collapses the run to one occurrence —
+        // the whole point of "down to one occurrence." Longest-first would
+        // wrongly settle for "a b c a b c" (two copies of the true unit).
+        let text = "a b c a b c a b c a b c a b c a b c";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, "a b c");
+    }
+
+    #[test]
+    fn test_phrase_collapse_short_text_untouched() {
+        // Fewer than 6 tokens can never satisfy a 2-word phrase x3 — must not panic.
+        let text = "thank you thank";
+        let result = collapse_phrase_repeats(text);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_phrase_collapse_empty_text() {
+        assert_eq!(collapse_phrase_repeats(""), "");
     }
 
     #[test]

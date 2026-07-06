@@ -67,6 +67,15 @@ impl VadConfig {
 /// policy while recording. Used to feed a live streaming transcription as audio arrives.
 pub type AudioFrameCallback = Arc<dyn Fn(&[f32]) + Send + Sync + 'static>;
 
+/// Upper bound on how long `stop()`/`close()` will wait on the recorder's
+/// consumer/worker thread before giving up. Guards against a permanently
+/// silent cpal input callback (e.g. an external mic unplugged mid-recording
+/// and never restored) wedging the caller forever while holding the
+/// recorder lock (see docs/handy-migration-spec.md §4/§6). `stop()`/`close()`
+/// must always return within this bound: on timeout we log loudly and give
+/// up rather than hang, regardless of what the audio callback does.
+const RECORDER_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub struct AudioRecorder {
     device: Option<Device>,
     cmd_tx: Option<mpsc::Sender<Cmd>>,
@@ -279,7 +288,21 @@ impl AudioRecorder {
         if let Some(tx) = &self.cmd_tx {
             tx.send(Cmd::Stop(resp_tx))?;
         }
-        Ok(resp_rx.recv()?) // wait for the samples
+        // Bounded wait for the samples: a permanently silent cpal callback
+        // (e.g. an unplugged/stalled input device) must never wedge the
+        // caller forever.
+        match resp_rx.recv_timeout(RECORDER_STOP_TIMEOUT) {
+            Ok(samples) => Ok(samples),
+            Err(_) => {
+                log::error!(
+                    "Recorder did not respond to stop() within {RECORDER_STOP_TIMEOUT:?}; \
+                     giving up rather than hang (likely a stalled/unplugged input device)"
+                );
+                Err(Box::new(Error::other(
+                    "Timed out waiting for recorder to stop",
+                )))
+            }
+        }
     }
 
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -287,7 +310,7 @@ impl AudioRecorder {
             let _ = tx.send(Cmd::Shutdown);
         }
         if let Some(h) = self.worker_handle.take() {
-            let _ = h.join();
+            join_with_timeout(h, RECORDER_STOP_TIMEOUT)?;
         }
         self.device = None;
         Ok(())
@@ -407,6 +430,34 @@ impl AudioRecorder {
     }
 }
 
+/// Joins a worker thread, but never blocks longer than `timeout`. If the
+/// thread hasn't exited by then, the handle is abandoned (the underlying OS
+/// thread keeps running to completion in the background) instead of blocking
+/// the caller — a stalled worker can never wedge `close()`.
+fn join_with_timeout(
+    handle: std::thread::JoinHandle<()>,
+    timeout: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (done_tx, done_rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+
+    match done_rx.recv_timeout(timeout) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            log::error!(
+                "Recorder worker thread did not exit within {timeout:?}; abandoning it \
+                 rather than hang (likely a stalled/unplugged input device)"
+            );
+            Err(Box::new(Error::other(
+                "Timed out waiting for recorder worker thread to exit",
+            )))
+        }
+    }
+}
+
 pub fn is_microphone_access_denied(error_message: &str) -> bool {
     let normalized = error_message.to_lowercase();
     normalized.contains("access is denied")
@@ -423,7 +474,12 @@ pub fn is_no_input_device_error(error_message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_microphone_access_denied, is_no_input_device_error};
+    use super::{
+        is_microphone_access_denied, is_no_input_device_error, join_with_timeout, run_consumer,
+        AudioChunk, Cmd,
+    };
+    use std::sync::{atomic::AtomicBool, mpsc, Arc};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn detects_access_is_denied() {
@@ -461,6 +517,75 @@ mod tests {
     fn does_not_match_other_errors_for_no_device() {
         assert!(!is_no_input_device_error("permission denied"));
         assert!(!is_no_input_device_error("device not found"));
+    }
+
+    /// The actual wedge (see docs/handy-migration-spec.md §4/§6): a permanently
+    /// silent cpal input callback (mic unplugged mid-recording) means
+    /// `sample_tx` never sends another `AudioChunk`, so `run_consumer`'s main
+    /// loop must not block on `sample_rx` forever — it has to keep servicing
+    /// `cmd_rx` on a bounded cadence, or a pending `Stop`/`Shutdown` can never
+    /// be processed. No real audio device needed: `run_consumer` only depends
+    /// on channels.
+    #[test]
+    fn run_consumer_services_stop_when_producer_goes_permanently_silent() {
+        let (sample_tx, sample_rx) = mpsc::channel::<AudioChunk>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let worker = std::thread::spawn(move || {
+            run_consumer(16000, None, sample_rx, cmd_rx, None, None, stop_flag);
+        });
+
+        // Keep the producer's sender alive (as cpal would, mid-stream) but
+        // never send on it — simulating a stalled/unplugged input device.
+        let _silent_producer = sample_tx;
+
+        let (resp_tx, resp_rx) = mpsc::channel();
+        cmd_tx.send(Cmd::Stop(resp_tx)).unwrap();
+
+        let start = Instant::now();
+        let result = resp_rx.recv_timeout(Duration::from_secs(3));
+        assert!(
+            result.is_ok(),
+            "stop() was not serviced within bounded time while the producer was silent"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "servicing Stop took unexpectedly long: {:?}",
+            start.elapsed()
+        );
+
+        cmd_tx.send(Cmd::Shutdown).unwrap();
+        worker.join().expect("consumer thread should exit cleanly");
+    }
+
+    /// Defense-in-depth check on the `close()` call site: even if a worker
+    /// thread never exits, `join_with_timeout` must still bound the wait
+    /// rather than hang, and it must return promptly on the happy path.
+    #[test]
+    fn join_with_timeout_returns_promptly_when_thread_exits_quickly() {
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(10));
+        });
+        assert!(join_with_timeout(handle, Duration::from_secs(2)).is_ok());
+    }
+
+    #[test]
+    fn join_with_timeout_bounds_wait_when_thread_never_exits() {
+        // Simulates a permanently wedged worker thread — the exact shape of
+        // the real wedge this guards against.
+        let handle = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(3600));
+        });
+
+        let start = Instant::now();
+        let result = join_with_timeout(handle, Duration::from_millis(200));
+        assert!(result.is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "join_with_timeout did not bound the wait: took {:?}",
+            start.elapsed()
+        );
     }
 }
 
@@ -540,31 +665,49 @@ fn run_consumer(
         }
     }
 
-    // Runs until the stream closes and `recv` returns `Err`.
-    while let Ok(chunk) = sample_rx.recv() {
-        let raw = match chunk {
-            AudioChunk::Samples(s) => s,
-            AudioChunk::EndOfStream => continue,
-        };
+    // Poll interval for the outer loop when no audio is arriving. A
+    // permanently silent producer (e.g. an unplugged/stalled input device)
+    // must not stop a pending Stop/Shutdown from being serviced, so the loop
+    // wakes on this cadence — even with nothing in `sample_rx` — to check
+    // `cmd_rx` below. This is the fix for the stop()/close() wedge: on the
+    // happy path (chunks arriving normally) behavior is unchanged, since
+    // `recv_timeout` returns immediately once a chunk is available.
+    const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-        // ---------- spectrum processing ---------------------------------- //
-        if let Some(buckets) = visualizer.feed(&raw) {
-            if let Some(cb) = &level_cb {
-                cb(buckets);
+    // Runs until the stream closes and the channel disconnects.
+    loop {
+        match sample_rx.recv_timeout(IDLE_POLL_INTERVAL) {
+            Ok(chunk) => {
+                let raw = match chunk {
+                    AudioChunk::Samples(s) => s,
+                    AudioChunk::EndOfStream => continue,
+                };
+
+                // ---------- spectrum processing ---------------------------------- //
+                if let Some(buckets) = visualizer.feed(&raw) {
+                    if let Some(cb) = &level_cb {
+                        cb(buckets);
+                    }
+                }
+
+                // ---------- existing pipeline ------------------------------------ //
+                frame_resampler.push(&raw, &mut |frame: &[f32]| {
+                    handle_frame(
+                        frame,
+                        recording,
+                        vad_policy,
+                        &vad,
+                        &audio_cb,
+                        &mut processed_samples,
+                    )
+                });
             }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // No audio arrived this interval — fall through to the
+                // command check below anyway.
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-
-        // ---------- existing pipeline ------------------------------------ //
-        frame_resampler.push(&raw, &mut |frame: &[f32]| {
-            handle_frame(
-                frame,
-                recording,
-                vad_policy,
-                &vad,
-                &audio_cb,
-                &mut processed_samples,
-            )
-        });
 
         // non-blocking check for a command
         while let Ok(cmd) = cmd_rx.try_recv() {

@@ -26,6 +26,11 @@ mod tray_i18n;
 mod utils;
 
 pub use cli::CliArgs;
+// Re-exported so the Tier A real-audio integration test
+// (tests/real_audio_pipeline.rs) can drive the RemoteSocket engine client
+// against the live MLX whisper daemon. Additive: no app code path changes; the
+// module and its items were already `pub` inside the (private) `managers` tree.
+pub use managers::remote_socket;
 #[cfg(debug_assertions)]
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use tauri_specta::{collect_commands, collect_events, Builder};

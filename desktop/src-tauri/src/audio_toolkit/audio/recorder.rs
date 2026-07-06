@@ -559,6 +559,49 @@ mod tests {
         worker.join().expect("consumer thread should exit cleanly");
     }
 
+    /// Companion to the `Stop` wedge test above, pinning the `close()`/`Shutdown`
+    /// half of the same invariant: `run_consumer` must observe a `Shutdown`
+    /// command and exit in bounded time even when the producer has gone
+    /// permanently silent (no audio, no channel disconnect ever arrives). This
+    /// depends on the outer loop's bounded idle poll — revert
+    /// `sample_rx.recv_timeout(IDLE_POLL_INTERVAL)` to a blocking `recv()` and
+    /// this test fails at the 3 s bound instead of hanging forever, which is
+    /// exactly the regression the timeout guards against.
+    #[test]
+    fn run_consumer_exits_on_shutdown_when_producer_goes_permanently_silent() {
+        let (sample_tx, sample_rx) = mpsc::channel::<AudioChunk>();
+        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        let worker = std::thread::spawn(move || {
+            run_consumer(16000, None, sample_rx, cmd_rx, None, None, stop_flag);
+        });
+
+        // Producer alive but silent, exactly like a stalled/unplugged cpal input.
+        let _silent_producer = sample_tx;
+
+        cmd_tx.send(Cmd::Shutdown).unwrap();
+
+        // Join on a helper thread so a regression (blocking recv in the outer
+        // loop) fails this test at the bound rather than hanging the suite.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _ = worker.join();
+            let _ = done_tx.send(());
+        });
+
+        let start = Instant::now();
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+            "run_consumer did not process Shutdown within bounded time while the producer was silent"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "servicing Shutdown took unexpectedly long: {:?}",
+            start.elapsed()
+        );
+    }
+
     /// Defense-in-depth check on the `close()` call site: even if a worker
     /// thread never exits, `join_with_timeout` must still bound the wait
     /// rather than hang, and it must return promptly on the happy path.

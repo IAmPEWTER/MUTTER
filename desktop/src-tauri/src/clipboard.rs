@@ -600,6 +600,15 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
         text
     };
 
+    // Screen Sharing: Cmd+V there reaches the REMOTE machine's clipboard,
+    // never ours (see paste_keycodes.rs for the full why). Route through
+    // real keycode events instead of the clipboard+paste-key dispatch below.
+    #[cfg(target_os = "macos")]
+    if crate::frontmost::is_screen_sharing() {
+        info!("Screen Sharing frontmost — typing via real keycodes instead of clipboard paste");
+        return crate::paste_keycodes::type_text(&text);
+    }
+
     info!(
         "Using paste method: {:?}, delay: {}ms",
         paste_method, paste_delay_ms

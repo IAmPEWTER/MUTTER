@@ -137,6 +137,15 @@ transcribe-cpp = { version = "0.1.0", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", branch = "v2.1" }
 transcribe-cpp = { version = "0.1.0", default-features = false, features = ["metal"] }
+# Frontmost-app detection for the Screen Sharing paste seam (frontmost.rs).
+# Already in the dependency graph transitively (enigo, arboard, muda, ...);
+# this just promotes it to a direct dependency at the same resolved version
+# so we can name NSWorkspace/NSRunningApplication ourselves.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+  "std",
+  "NSWorkspace",
+  "NSRunningApplication",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk-layer-shell = { version = "0.8", features = ["v0_6"] }

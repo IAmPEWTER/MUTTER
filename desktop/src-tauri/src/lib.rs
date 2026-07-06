@@ -7,11 +7,15 @@ mod catalog;
 pub mod cli;
 mod clipboard;
 mod commands;
+#[cfg(target_os = "macos")]
+mod frontmost;
 mod helpers;
 mod input;
 mod llm_client;
 mod managers;
 mod overlay;
+#[cfg(target_os = "macos")]
+mod paste_keycodes;
 pub mod portable;
 mod settings;
 mod shortcut;

@@ -1,6 +1,6 @@
 # MUTTER → Handy migration spec
 
-Status: proposed. Source research: `logs/2026-07-06-handy-migration-feasibility.md` (5-agent read of Handy `dad37ba`, MIT). Telegraphic by design.
+Status: **executed 2026-07-06** — vendored at `desktop/` (Handy v0.9.0), R1–R18 built/tested, native app in daily-driver soak; Python daemon retained until the parity gate (`parity-R1-R18.md`) clears. Execution log: `logs/2026-07-06-handy-vendor-execution.md`. Seam ledger: `desktop/PATCHES.md`. Source research: `logs/2026-07-06-handy-migration-feasibility.md` (5-agent read of Handy `dad37ba`, MIT). Telegraphic by design.
 
 ## 0. Goals — definition of done
 The new MUTTER ships only when all three hold:

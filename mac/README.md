@@ -4,6 +4,13 @@
 
 # MUTTER
 
+> **Legacy (Python daemon).** As of 2026-07, the Mac implementation is
+> migrating to a native Rust/Tauri app at [../desktop/](../desktop/)
+> (vendored Handy + our MLX service). This Python daemon stays installed
+> as the fallback during the native app's soak and is retired only once
+> the parity gate clears ([../docs/parity-R1-R18.md](../docs/parity-R1-R18.md)).
+> Switch fn ownership between the two: `scripts/mutter-switch {app|python|status}`.
+
 Hold the **fn** (or **🌐**) key on your Mac, speak, release — your
 words appear typed at the cursor. Whisper speech-recognition running
 on your Mac, not in the cloud. Works through Screen Sharing.

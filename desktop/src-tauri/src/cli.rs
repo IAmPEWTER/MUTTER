@@ -12,6 +12,13 @@ pub struct CliArgs {
     #[arg(long)]
     pub no_tray: bool,
 
+    /// Run as a pure background agent: no window, no dock icon, no tray —
+    /// invisible, like a launchd daemon. Reachable only via the CLI flags,
+    /// or by launching the app again (which opens the settings window).
+    /// MUTTER's resident login-item mode.
+    #[arg(long)]
+    pub headless: bool,
+
     /// Toggle transcription on/off (sent to running instance)
     #[arg(long)]
     pub toggle_transcription: bool,

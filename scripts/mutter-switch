@@ -11,7 +11,7 @@ PY_PLIST="$HOME/Library/LaunchAgents/com.peter.mutter.plist"
 APP="/Applications/MUTTER.app"
 
 py_loaded(){ launchctl list 2>/dev/null | grep -q "com.peter.mutter$"; }
-app_running(){ pgrep -f "MUTTER.app/Contents/MacOS/handy" >/dev/null 2>&1; }
+app_running(){ pgrep -f "MUTTER.app/Contents/MacOS/mutter" >/dev/null 2>&1; }
 
 stop_python(){ py_loaded && launchctl bootout "gui/$UID_/com.peter.mutter" 2>/dev/null || true; }
 start_python(){ [ -f "$PY_PLIST" ] && launchctl bootstrap "gui/$UID_" "$PY_PLIST" 2>/dev/null || \

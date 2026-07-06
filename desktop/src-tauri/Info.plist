@@ -4,5 +4,14 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>Request microphone access to transcribe audio locally</string>
+  <!--
+    MUTTER ships as an invisible background agent (a dictation daemon): no Dock
+    icon, no global menu bar. LSUIElement makes it an "agent" app. When a window
+    IS shown (settings, via relaunching the app), show_main_window() flips the
+    activation policy to Regular so a Dock icon appears for that session, then
+    back to accessory on close. Tauri auto-merges this into the bundle Info.plist.
+  -->
+  <key>LSUIElement</key>
+  <true/>
 </dict>
 </plist>

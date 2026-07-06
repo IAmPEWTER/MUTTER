@@ -191,7 +191,15 @@ function App() {
         // Returning user - check if they need to grant permissions first
         setIsReturningUser(true);
 
-        if (currentPlatform === "macos") {
+        // MUTTER headless/hidden-agent mode: a start-hidden daemon must never
+        // force a permissions window open. It records via cpal regardless of
+        // AVCaptureDevice's stricter authorizationStatus, so skip the gate and
+        // drop straight into the (hidden) main app — like the old Python daemon.
+        const startHidden =
+          settingsResult.status === "ok" &&
+          settingsResult.data.start_hidden === true;
+
+        if (!startHidden && currentPlatform === "macos") {
           try {
             const [hasAccessibility, hasMicrophone] = await Promise.all([
               checkAccessibilityPermission(),
@@ -208,7 +216,7 @@ function App() {
           }
         }
 
-        if (currentPlatform === "windows") {
+        if (!startHidden && currentPlatform === "windows") {
           try {
             const microphoneStatus =
               await commands.getWindowsMicrophonePermissionStatus();

@@ -45,3 +45,19 @@ Date: 2026-07-06. Session: mutter Ruster. Executing docs/handy-migration-spec.md
 
 ## Daemon state
 - Python daemon `com.peter.mutter` booted out (plist symlink still at `~/Library/LaunchAgents/`, unloaded). whisper service up. No app autostart plist yet (`autostart_enabled:false`). Nothing owns fn persistently until soak setup.
+
+## Headless / invisible agent + full internal rename (2026-07-06)
+Goal: no visible app at all — like the old Python daemon. No dock icon, window, tray, or menu bar; nothing says "handy" anywhere the user can see (incl. macOS system notifications).
+
+- **Executable renamed `handy` → `mutter`** via `mainBinaryName` in `tauri.conf.json` (crate/lib stay `handy`/`handy_app_lib` — invisible). This is what macOS quotes in the "… can run in the background" and Accessibility system notifications; they now say **mutter**. Login-item plist + `scripts/mutter-switch` updated to the new exe path.
+- **Invisible = `LSUIElement=true`** (merged from `src-tauri/Info.plist`; Tauri auto-merges that file). App runs as a `UIElement` agent: no dock tile, no menu bar. Runtime `set_activation_policy(Accessory)` alone was NOT enough — launchd re-foregrounds the app and AppKit resets the policy after `setup`, re-adding the dock icon; `LSUIElement` is deterministic. `show_main_window` still flips to `Regular` when a settings window is actually shown (relaunch `open -a MUTTER`).
+- **`--headless` flag** (new, `cli.rs`) = hides tray + skips window-show + (via `App.tsx`) skips the permission-onboarding gate. The gate was force-opening the window (→ dock icon) because the mic check false-negatived (below). Login item runs `mutter --headless`.
+- **Dock "MUTTER" while testing = recents ghost, not a tile.** macOS "Show recent applications in Dock" lists recently-launched apps; repeated relaunches populate it even for a UIElement agent. Verified NOT a running tile (survives app quit). Cleared by filtering `recent-apps` in `com.apple.dock` (see the python one-liner in session). NOT fixed by touching the app. Unknown whether a real boot-login (vs interactive `launchctl bootstrap`) populates it.
+
+### TCC mic — SUPERSEDES the csreq=NULL note above (for Microphone only)
+- `csreq=NULL` works for **Accessibility** (silent, cdhash-independent, survives rebuilds) but **NOT for Microphone**: with NULL, the app's startup mic open (cpal) + `AVCaptureDevice.authorizationStatus` read as *not-determined* → macOS shows the "MUTTER would like to access the Microphone" prompt on every launch, and the onboarding gate false-negatives.
+- **Fix: identifier-based `csreq` for the mic row** — compile `identifier "com.peter.mutter.app"` (matches by bundle id, cdhash-independent → survives rebuilds like NULL does, but is a *valid requirement* AVFoundation honors):
+  `printf 'identifier "com.peter.mutter.app"' | csreq -r- -b /tmp/m.csreq`
+  `HEX=$(xxd -p /tmp/m.csreq | tr -d '\n'); sudo sqlite3 <TCC.db> "UPDATE access SET auth_value=2, csreq=X'$HEX' WHERE client='com.peter.mutter.app' AND service='kTCCServiceMicrophone';"`
+  Verified: clean relaunch, **no mic prompt**. Current state: Accessibility auth=2/csreq NULL, Microphone auth=2/csreq id-based(40B).
+- **TCC permission dialogs reject synthetic clicks** (cliclick/CGEvent) as an anti-malware measure — can't dismiss/grant them programmatically. A stuck/orphaned TCC dialog (requester died) clears with `killall UserNotificationCenter` (respawns).

@@ -203,10 +203,12 @@ fn initialize_core_logic(app_handle: &AppHandle) {
 
     // Apply macOS Accessory policy if starting hidden and tray is available.
     // If the tray icon is disabled, keep the dock icon so the user can reopen.
+    // --headless (MUTTER) always goes Accessory: it is a deliberate no-UI agent.
     #[cfg(target_os = "macos")]
     {
         let settings = settings::get_settings(app_handle);
-        if settings.start_hidden && settings.show_tray_icon {
+        let headless = app_handle.state::<CliArgs>().headless;
+        if headless || (settings.start_hidden && settings.show_tray_icon) {
             let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
     }
@@ -860,21 +862,24 @@ pub fn run(cli_args: CliArgs) {
                 let _ = crate::managers::transcription::get_available_accelerators();
             });
 
-            // Hide tray icon if --no-tray was passed
-            if cli_args.no_tray {
+            // Hide tray icon if --no-tray or --headless was passed
+            if cli_args.no_tray || cli_args.headless {
                 tray::set_tray_visibility(&app_handle, false);
             }
 
             // Show main window only if not starting hidden.
-            // CLI --start-hidden flag overrides the setting.
+            // CLI --start-hidden / --headless flags override the setting.
             // But if permission onboarding is required, always show the window.
-            let should_hide = settings.start_hidden || cli_args.start_hidden;
+            let should_hide = settings.start_hidden || cli_args.start_hidden || cli_args.headless;
             let should_force_show = should_force_show_permissions_window(&app_handle);
 
             // If start_hidden but tray is disabled, we must show the window
             // anyway. Without a tray icon, the dock is the only way back in.
-            let tray_available = settings.show_tray_icon && !cli_args.no_tray;
-            if should_force_show || !should_hide || !tray_available {
+            // --headless opts out of that fallback on purpose: it is a resident
+            // no-UI agent, reopened by relaunching the app (single-instance).
+            let tray_available =
+                settings.show_tray_icon && !cli_args.no_tray && !cli_args.headless;
+            if should_force_show || !should_hide || (!tray_available && !cli_args.headless) {
                 show_main_window(&app_handle);
             }
 
@@ -913,6 +918,17 @@ pub fn run(cli_args: CliArgs) {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match &event {
+            // MUTTER --headless: re-assert Accessory once the run loop is up.
+            // launchd (RunAtLoad) brings the app foreground and AppKit resets
+            // the policy to Regular after `setup` runs, so the dock icon
+            // reappears unless we set it again here — this is what makes the
+            // agent truly invisible (no dock icon), matching the old daemon.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Ready => {
+                if app.state::<CliArgs>().headless {
+                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 show_main_window(app);

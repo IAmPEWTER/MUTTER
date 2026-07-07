@@ -35,6 +35,17 @@ pub struct Clip {
     pub sample_rate: u32,
 }
 
+impl Clip {
+    /// A clip with no audio (nothing recorded, or teardown gave up). The rate
+    /// is irrelevant with zero samples; 16 kHz just avoids a bogus 0.
+    fn empty() -> Self {
+        Self {
+            samples: Vec::new(),
+            sample_rate: 16_000,
+        }
+    }
+}
+
 enum Cmd {
     Start,
     Stop(Sender<Clip>),
@@ -71,24 +82,15 @@ impl Recorder {
         let (resp_tx, resp_rx) = mpsc::channel();
         if self.cmd_tx.send(Cmd::Stop(resp_tx)).is_err() {
             log::error!("recorder worker is gone; can't stop");
-            return Clip {
-                samples: Vec::new(),
-                sample_rate: 16_000,
-            };
+            return Clip::empty();
         }
         match resp_rx.recv_timeout(STOP_TIMEOUT) {
             Ok(clip) => clip,
             Err(RecvTimeoutError::Timeout) => {
                 log::error!("recorder stop timed out ({STOP_TIMEOUT:?}) — audio thread wedged; leaking it");
-                Clip {
-                    samples: Vec::new(),
-                    sample_rate: 16_000,
-                }
+                Clip::empty()
             }
-            Err(RecvTimeoutError::Disconnected) => Clip {
-                samples: Vec::new(),
-                sample_rate: 16_000,
-            },
+            Err(RecvTimeoutError::Disconnected) => Clip::empty(),
         }
     }
 }
@@ -146,10 +148,7 @@ fn worker_loop(cmd_rx: Receiver<Cmd>) {
             Cmd::Stop(resp) => {
                 let clip = match active.take() {
                     Some(a) => a.finish(),
-                    None => Clip {
-                        samples: Vec::new(),
-                        sample_rate: 16_000,
-                    },
+                    None => Clip::empty(),
                 };
                 let _ = resp.send(clip);
             }

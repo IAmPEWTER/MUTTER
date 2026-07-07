@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  MUTTER daemon LaunchAgent template. install.sh substitutes __HOME__ for the
+  current user's home and installs the result to
+  ~/Library/LaunchAgents/com.peter.mutter.app.plist.
+
+  Runs the native daemon from inside /Applications/MUTTER.app ONLY to inherit
+  that bundle's Accessibility + Microphone TCC grants (there is no GUI).
+  KeepAlive/SuccessfulExit:false = respawn on any crash or hard-exit — the same
+  launchd safety net the old Python daemon relied on.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.peter.mutter.app</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Applications/MUTTER.app/Contents/MacOS/mutter</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>RUST_LOG</key>
+		<string>info</string>
+	</dict>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>__HOME__/Library/Logs/mutter/app.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__HOME__/Library/Logs/mutter/app.err.log</string>
+</dict>
+</plist>

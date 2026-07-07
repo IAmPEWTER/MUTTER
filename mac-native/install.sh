@@ -1,0 +1,73 @@
+#!/bin/bash
+# Build + install the MUTTER dictation daemon on this Mac.
+#
+#   ./install.sh
+#
+# Self-contained: assembles /Applications/MUTTER.app around the compiled binary
+# (no Tauri/Xcode toolchain needed), installs the LaunchAgent, and loads it.
+# Idempotent — safe to re-run to update after a `git pull`.
+#
+# Requires: Rust (rustup), and the shared MLX whisper service running.
+set -euo pipefail
+
+BUNDLE="/Applications/MUTTER.app"
+IDENT="com.peter.mutter.app"
+PLIST="$HOME/Library/LaunchAgents/${IDENT}.plist"
+LOGDIR="$HOME/Library/Logs/mutter"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "== MUTTER daemon install =="
+
+# --- cargo (rustup installs to the toolchain dir; PATH may lack the shim) ----
+if command -v cargo >/dev/null 2>&1; then
+    CARGO="$(command -v cargo)"
+elif command -v rustup >/dev/null 2>&1; then
+    CARGO="$(rustup which cargo)"
+    # Put the toolchain's bin on PATH so cargo can find its sibling rustc.
+    export PATH="$(dirname "$CARGO"):$PATH"
+else
+    echo "ERROR: Rust not found. Install it: https://rustup.rs" >&2
+    exit 1
+fi
+
+echo "-- building (release) --"
+( cd "$HERE" && "$CARGO" build --release )
+BIN="$HERE/target/release/mutter"
+[ -x "$BIN" ] || { echo "ERROR: build produced no binary at $BIN" >&2; exit 1; }
+
+echo "-- assembling $BUNDLE --"
+mkdir -p "$BUNDLE/Contents/MacOS"
+cp "$HERE/Info.plist" "$BUNDLE/Contents/Info.plist"
+cp "$BIN" "$BUNDLE/Contents/MacOS/mutter"
+
+echo "-- signing (ad-hoc, stable identifier so TCC grants persist) --"
+codesign --force --sign - --identifier "$IDENT" "$BUNDLE"
+
+echo "-- installing LaunchAgent --"
+mkdir -p "$LOGDIR" "$(dirname "$PLIST")"
+sed "s|__HOME__|$HOME|g" "$HERE/com.peter.mutter.app.plist" > "$PLIST"
+
+echo "-- (re)loading daemon --"
+launchctl bootout "gui/$(id -u)/${IDENT}" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+sleep 2
+
+# --- whisper service sanity (check the socket the daemon actually uses) -----
+WSOCK="${WHISPER_SOCK:-${TMPDIR:-/tmp/}whisper.sock}"
+if [ ! -S "$WSOCK" ]; then
+    echo ""
+    echo "WARNING: whisper socket not found at $WSOCK."
+    echo "         MUTTER needs the shared MLX whisper service running"
+    echo "         (see ~/Documents/services/whisper/)."
+fi
+
+echo ""
+echo "Installed. First run needs two macOS permissions for MUTTER.app:"
+echo "  1. Accessibility  (to read the fn key + type at the cursor)"
+echo "  2. Microphone     (prompts automatically on your first fn-hold)"
+echo "Opening the Accessibility pane — enable MUTTER there if it isn't already."
+open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
+
+echo ""
+echo "Then: click into any text field, hold fn, speak, release."
+echo "Logs: $LOGDIR/app.err.log"

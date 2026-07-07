@@ -1,0 +1,38 @@
+[package]
+name = "mutter"
+version = "0.1.0"
+edition = "2021"
+description = "MUTTER — headless push-to-talk dictation daemon for macOS. Hold fn, speak, release; words are typed at the cursor. Local Whisper via the shared MLX service."
+license = "MIT"
+
+[[bin]]
+name = "mutter"
+path = "src/main.rs"
+
+[dependencies]
+# Decision 1 (robust trigger): handy-keys owns the CGEventTap and re-enables it
+# every 100ms + re-derives fn from the OS flags every event, so a tap macOS
+# disables under load/sleep heals in place instead of silently dropping fn-up.
+handy-keys = "0.2.4"
+# Decision 2 (robust audio): cpal owns the stream; drop() is a clean
+# stop→uninit→dispose that never re-enters a HAL lock (unlike PortAudio's
+# Pa_CloseStream), so teardown can't deadlock. recorder.rs bounds it anyway.
+cpal = "0.16"
+# Capture at the device-native rate and resample in software — don't force the
+# hardware clock to 16 kHz (that was the old daemon's Bluetooth-fragile choice).
+rubato = "0.16"
+# enigo posts the real keycode/Unicode CGEvents for text injection.
+enigo = "0.6"
+anyhow = "1"
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[dev-dependencies]
+# WAV reader for the offline smoke test only (examples/regression, never shipped).
+hound = "3"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Minimal app-bundle Info.plist for the MUTTER daemon. install.sh assembles a
+  bundle around the compiled `mutter` binary using this. Two keys are load-
+  bearing:
+    - LSUIElement=true      -> background agent: no dock icon, no menu bar.
+    - CFBundleIdentifier    -> the identity macOS TCC keys Accessibility +
+                               Microphone grants on. Keep it stable across
+                               machines/rebuilds or every update re-prompts.
+  NSMicrophoneUsageDescription is mandatory: macOS refuses mic access without it.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>mutter</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.peter.mutter.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>MUTTER</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleVersion</key>
+	<string>1.0.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>13.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>MUTTER transcribes your speech locally while you hold the fn key.</string>
+</dict>
+</plist>

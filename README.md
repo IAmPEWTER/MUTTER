@@ -8,12 +8,12 @@ Hold a key, speak, release — your words appear typed at the cursor. Local Whis
 
 | Platform | Where | Status |
 |---|---|---|
-| **Mac** — hold **fn / 🌐** | [desktop/](desktop/) | native app (Rust/Tauri), in soak — supersedes the Python daemon in [mac/](mac/) |
+| **Mac** — hold **fn / 🌐** | [mac-native/](mac-native/) | headless native Rust daemon — supersedes the Python daemon in [mac/](mac/) |
 | **Android** — hold **volume-down** | [android/](android/) | live (APK) |
 | **iOS** | [ios/](ios/) | not started |
 
-The Mac app is a vendored, MUTTER-branded build of [Handy](https://github.com/cjpais/Handy) (MIT) that keeps our shared MLX whisper service as the ASR brain. It replaces the fragile Python audio/event-tap layer with a hardened native one. Seam ledger + upstream-merge rules: [desktop/PATCHES.md](desktop/PATCHES.md). Migration story: [docs/handy-migration-spec.md](docs/handy-migration-spec.md). The Python daemon ([mac/](mac/)) stays installed until the native app clears its soak + parity gate ([docs/parity-R1-R18.md](docs/parity-R1-R18.md)).
+The Mac daemon behaves exactly like the old Python daemon ([mac/](mac/)) — invisible background agent, hold fn to dictate — but rebuilt on the two low-level choices that made it robust (self-healing fn event-tap; non-deadlocking cpal audio teardown), and none of the GUI. Shared MLX whisper service is the ASR brain. Rationale + install: [mac-native/README.md](mac-native/README.md). (An earlier attempt vendored the [Handy](https://github.com/cjpais/Handy) Tauri app in `desktop/`; superseded — only the two robustness choices were worth keeping.)
 
-Install (Mac, legacy Python daemon): `curl -fsSL https://raw.githubusercontent.com/IAmPEWTER/MUTTER/main/install.sh | bash`
+Install (Mac): `cd mac-native && ./install.sh`
 
 Decisions: cross-platform in [DECISIONS.md](DECISIONS.md), per-platform in each subproject.

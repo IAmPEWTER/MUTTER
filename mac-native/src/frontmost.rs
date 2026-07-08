@@ -1,111 +1,43 @@
 //! Which app currently has focus — needed only to answer "is Screen Sharing
 //! frontmost?", which selects the injection path (keycodes vs Unicode text).
 //!
-//! Ported from the old Python daemon's `_frontmost_is_screen_sharing`. The
-//! subtlety it documents: AppKit's `NSWorkspace.frontmostApplication` only
-//! refreshes when the main run loop pumps events in a common mode, and this
-//! daemon's main thread blocks in the hotkey loop — it never pumps one. So its
-//! cache would freeze at startup state. The Accessibility API + libproc are
-//! both real-time and run-loop-free, so we use them directly.
+//! The old Python daemon answered this with the Accessibility API's
+//! system-wide "AXFocusedApplication". On this macOS (Darwin 25) that query
+//! fails unconditionally from this process shape — kAXErrorCannotComplete
+//! (-25204) on every call, AX-trusted or not, with or without a pumped
+//! CFRunLoop (probed empirically 2026-07-08). NSWorkspace is no alternative:
+//! its `frontmostApplication` cache only refreshes when the main run loop
+//! pumps, and this daemon's main thread blocks in the hotkey loop.
 //!
-//! Requires the Accessibility permission the daemon already holds for enigo.
+//! LaunchServices still answers in real time, so we ask it via `lsappinfo` —
+//! one short-lived subprocess per dictation, the same idiom as the osascript
+//! mute toggle. It also measures app *activation* (which decides where
+//! keystrokes land), not window z-order, which can disagree.
 
-use std::ffi::CString;
-use std::os::raw::{c_char, c_int};
-use std::ptr;
+use std::process::Command;
 
-type CFTypeRef = *const std::ffi::c_void;
-type CFStringRef = *const std::ffi::c_void;
-type AXUIElementRef = *const std::ffi::c_void;
-type AXError = i32;
-
-#[allow(non_upper_case_globals)]
-const kCFStringEncodingUTF8: u32 = 0x0800_0100;
-
-#[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
-    fn CFStringCreateWithCString(
-        alloc: CFTypeRef,
-        c_str: *const c_char,
-        encoding: u32,
-    ) -> CFStringRef;
-    fn CFRelease(cf: CFTypeRef);
-}
-
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn AXUIElementCreateSystemWide() -> AXUIElementRef;
-    fn AXUIElementCopyAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        value: *mut CFTypeRef,
-    ) -> AXError;
-    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
-}
-
-extern "C" {
-    // libproc, part of libSystem — no explicit link needed.
-    fn proc_pidpath(pid: c_int, buffer: *mut std::ffi::c_void, buffersize: u32) -> c_int;
-}
-
-/// True when the focused app's executable lives inside `Screen Sharing.app`.
-/// Any failure (no focus, permission denied, path unreadable) → `false`, so the
-/// caller falls back to the normal Unicode-text injection path.
+/// True when the frontmost (active) app is Screen Sharing. Any failure →
+/// `false`, so the caller falls back to the normal Unicode-text path.
 pub fn is_screen_sharing() -> bool {
-    match focused_app_path() {
-        Some(path) => path.contains("Screen Sharing.app"),
-        None => false,
-    }
+    frontmost_bundle_path().is_some_and(|p| p.contains("Screen Sharing.app"))
 }
 
-fn focused_app_path() -> Option<String> {
-    let pid = focused_app_pid()?;
-    process_path(pid)
-}
-
-fn focused_app_pid() -> Option<i32> {
-    unsafe {
-        let system_wide = AXUIElementCreateSystemWide();
-        if system_wide.is_null() {
-            return None;
-        }
-        let attr = cfstring("AXFocusedApplication");
-        if attr.is_null() {
-            CFRelease(system_wide);
-            return None;
-        }
-        let mut focused: CFTypeRef = ptr::null();
-        let err = AXUIElementCopyAttributeValue(system_wide, attr, &mut focused);
-        CFRelease(attr);
-        CFRelease(system_wide);
-        if err != 0 || focused.is_null() {
-            return None;
-        }
-        let mut pid: i32 = 0;
-        let err = AXUIElementGetPid(focused, &mut pid);
-        CFRelease(focused);
-        if err != 0 {
-            return None;
-        }
-        Some(pid)
-    }
-}
-
-fn process_path(pid: i32) -> Option<String> {
-    let mut buf = vec![0u8; 4096];
-    let n = unsafe { proc_pidpath(pid, buf.as_mut_ptr() as *mut std::ffi::c_void, buf.len() as u32) };
-    if n <= 0 {
+/// Bundle path of the active app per LaunchServices. Output looks like
+/// `"LSBundlePath"="/System/Applications/Utilities/Screen Sharing.app"`;
+/// a substring check is all the caller needs, so it is not parsed further.
+fn frontmost_bundle_path() -> Option<String> {
+    let asn = lsappinfo(&["front"])?;
+    let asn = asn.trim();
+    if asn.is_empty() {
         return None;
     }
-    buf.truncate(n as usize);
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    lsappinfo(&["info", "-only", "bundlepath", asn])
 }
 
-/// Create a +1-retained CFString from a Rust &str (caller must `CFRelease`).
-unsafe fn cfstring(s: &str) -> CFStringRef {
-    let c = match CString::new(s) {
-        Ok(c) => c,
-        Err(_) => return ptr::null(),
-    };
-    CFStringCreateWithCString(ptr::null(), c.as_ptr(), kCFStringEncodingUTF8)
+fn lsappinfo(args: &[&str]) -> Option<String> {
+    let out = Command::new("lsappinfo").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }

@@ -5,3 +5,4 @@ venv/
 .DS_Store
 *.log
 /tmp/mutter*.log
+mac/com.peter.mutter.plist

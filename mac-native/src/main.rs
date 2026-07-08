@@ -21,6 +21,7 @@
 //! worker thread so the fn event loop is always free to catch the next press.
 
 mod frontmost;
+mod hallucination;
 mod inject;
 mod keycodes;
 mod recorder;
@@ -43,6 +44,11 @@ const LANGUAGE: &str = "en";
 /// How long to wait for the shared whisper service at startup before giving up
 /// and letting launchd respawn us. Matches the old daemon's 180 s ceiling.
 const WHISPER_WAIT: Duration = Duration::from_secs(180);
+
+/// Clips shorter than this are "the user didn't say anything" — dropped before
+/// they reach whisper (an accidental fn tap must never type). 0.3 s at the
+/// 16 kHz service rate, mirroring `stt.py`'s `MIN_CAPTURED_SEC`.
+const MIN_CLIP_SAMPLES: usize = 16_000 * 3 / 10;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -116,9 +122,15 @@ fn spawn_transcribe_worker(client: Client) -> Sender<Clip> {
     thread::spawn(move || {
         while let Ok(clip) = rx.recv() {
             let pcm16k = resample::to_16k(&clip.samples, clip.sample_rate);
+            if pcm16k.len() < MIN_CLIP_SAMPLES {
+                log::info!("clip too short ({} ms); ignoring", pcm16k.len() / 16);
+                continue;
+            }
             match client.transcribe(&pcm16k, 16_000, Some(LANGUAGE)) {
-                Ok(text) if !text.trim().is_empty() => inject::inject(&text),
-                Ok(_) => log::info!("empty transcription; nothing to type"),
+                Ok(text) if hallucination::is_hallucination(&text) => {
+                    log::info!("dropped hallucination/empty transcript: {:?}", text.trim());
+                }
+                Ok(text) => inject::inject(&text),
                 Err(e) => log::error!("transcription failed: {e:#}"),
             }
         }

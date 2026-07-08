@@ -19,7 +19,8 @@ The Python daemon's fragility was 100% its audio + event-tap layer. Two root cau
 | `recorder.rs` | cpal capture on a worker thread; bounded teardown (**decision 2**) |
 | `whisper.rs` | unix-socket client for the shared MLX whisper service |
 | `resample.rs` | device-native rate → 16 kHz (whisper hardcodes /16000) |
-| `frontmost.rs` | AX+libproc "is Screen Sharing frontmost?" (run-loop-free) |
+| `frontmost.rs` | "is Screen Sharing frontmost?" via LaunchServices (`lsappinfo`) |
+| `hallucination.rs` | drops whisper silence-boilerplate ("You", "Thank you.") before typing |
 | `keycodes.rs` | Screen-Sharing keycode typing (Cmd+V crosses to the remote) |
 | `inject.rs` | normal Unicode typing + clipboard fallback + mute-while-recording |
 
@@ -36,7 +37,7 @@ Requires Rust (`rustup`) and the shared MLX whisper service running (`~/Document
 - **Accessibility** — read the fn key + type. Grant manually: System Settings → Privacy & Security → Accessibility → enable **MUTTER**. `install.sh` opens the pane.
 - **Microphone** — prompts automatically on the first fn-hold.
 
-Both grants key on the bundle identifier `com.peter.mutter.app`; the ad-hoc signature keeps that stable so updates (`git pull` + `./install.sh`) never re-prompt.
+Both grants key on the bundle identifier `com.peter.mutter.app`. Microphone survives updates. Accessibility is additionally pinned to the exact binary hash (ad-hoc signing), so **every build from changed source needs one off/on toggle** of MUTTER in that pane. If the toggle doesn't take (row wedged after several binaries cycled): `tccutil reset Accessibility com.peter.mutter.app`, kickstart, toggle the fresh row.
 
 ## Why it lives in an .app bundle
 

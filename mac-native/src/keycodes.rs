@@ -19,23 +19,27 @@
 //! Screen Sharing's forwarder drops a flag-only modifier and `?` arrives
 //! as `/`), at an 8 ms floor between events.
 //!
-//! Posting: enigo's macOS backend already posts real `CGEventCreateKeyboardEvent`
-//! keycode events at `CGEventTapLocation::HID` for `Key::Other(keycode)`/
-//! `Key::Shift` (verified by reading `enigo-0.6.1`'s `macos_impl.rs`,
-//! `raw()`); that's the exact primitive daemon.py hand-rolls via Quartz.
-//! Reusing it means zero new CGEvent-posting code and zero new
-//! dependencies for that half of this file — enigo 0.6.1 is already a
-//! project dependency.
+//! Posting: hand-rolled `CGEvent`s from a `kCGEventSourceStateHIDSystemState`
+//! event source (via the `core-graphics` crate, already compiled as an enigo
+//! dependency) — NOT enigo. enigo 0.6.1 posts real keycode events too, but
+//! from a `CGEventSourceStateID::Private` source (its default
+//! `independent_of_keyboard_state: true`) and with
+//! `NonCoalesced | 0x2000_0000` stamped on every event (`macos_impl.rs`).
+//! Both deviate from daemon.py's recipe, and through Screen Sharing's
+//! keystroke forwarder the enigo-posted events arrived garbled on the
+//! remote. daemon.py's exact recipe is proven through that channel, so we
+//! post it verbatim: HID-system-state source, flags untouched except the
+//! shift mask on character events while Shift is physically held.
 //!
-//! The layout scan itself (`UCKeyTranslate`/`TISCopyCurrentKeyboardInputSource`)
+//! The layout scan (`UCKeyTranslate`/`TISCopyCurrentKeyboardInputSource`)
 //! isn't exposed by enigo (it's a private helper used only for its
 //! `Key::Unicode`, which doesn't handle shift), so this file talks to
 //! Carbon/CoreFoundation directly via `extern "C"` + framework linking —
 //! the same symbols pynput's ctypes loads from `Carbon.framework` in
-//! daemon.py. This needs no new crate dependency either: framework
-//! linking is a native `rustc`/linker feature.
+//! daemon.py.
 
-use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -91,6 +95,12 @@ const UC_SHIFT: u32 = 2;
 /// 8 ms inter-keystroke delay through Screen Sharing — measured floor for
 /// reliable delivery; daemon.py found 5 ms drops events under burst.
 const TYPE_INTER_CHAR_DELAY: Duration = Duration::from_millis(8);
+
+/// kVK_Shift. Posting an explicit physical Shift down before a shifted char
+/// (and up after) is required: just setting the shift *flag* on the key
+/// event isn't enough — Screen Sharing's forwarder drops the modifier and
+/// `?` arrives as `/`.
+const KEYCODE_SHIFT: u16 = 56;
 
 /// `char -> (keycode, needs_shift)` for the current keyboard layout.
 ///
@@ -240,11 +250,29 @@ fn normalize_for_typing(text: &str) -> String {
     out
 }
 
+/// Post one keyboard `CGEvent`: keycode down or up, optionally carrying the
+/// shift flag (and nothing else — daemon.py's `post`). Events are posted to
+/// `kCGHIDEventTap`, the same tap real hardware enters at.
+fn post_key(
+    source: &CGEventSource,
+    keycode: u16,
+    key_down: bool,
+    with_shift: bool,
+) -> Result<(), String> {
+    let ev = CGEvent::new_keyboard_event(source.clone(), keycode, key_down)
+        .map_err(|()| format!("CGEventCreateKeyboardEvent failed (keycode {keycode})"))?;
+    if with_shift {
+        ev.set_flags(CGEventFlags::CGEventFlagShift);
+    }
+    ev.post(CGEventTapLocation::HID);
+    Ok(())
+}
+
 /// Type `text` as real hardware keycode events, char by char, at an 8 ms
 /// floor. Brackets runs of shifted characters with explicit physical
-/// Shift key down/up (via enigo's `Key::Shift`) rather than only setting
-/// the event's shift flag — Screen Sharing's keystroke forwarder drops a
-/// flag-only modifier. Unmappable characters are silently skipped.
+/// Shift key down/up rather than only setting the event's shift flag —
+/// Screen Sharing's keystroke forwarder drops a flag-only modifier.
+/// Unmappable characters are silently skipped.
 ///
 /// Mirrors daemon.py's `_type_via_quartz_keycodes` exactly, including
 /// event ordering: no delay between a character's down/up pair, only
@@ -255,42 +283,38 @@ pub fn type_text(text: &str) -> Result<(), String> {
         return Err("mutter: keyboard layout keycode map unavailable".to_string());
     }
 
-    let mut enigo =
-        Enigo::new(&Settings::default()).map_err(|e| format!("Failed to init Enigo for keycode typing: {e}"))?;
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        .map_err(|()| "CGEventSourceCreate(HIDSystemState) failed".to_string())?;
 
     let mut shift_held = false;
-    for ch in normalize_for_typing(text).chars() {
-        let Some(&(keycode, needs_shift)) = map.get(&ch) else {
-            continue; // silent skip — matches daemon.py
-        };
+    let result = (|| {
+        for ch in normalize_for_typing(text).chars() {
+            let Some(&(keycode, needs_shift)) = map.get(&ch) else {
+                continue; // silent skip — matches daemon.py
+            };
 
-        if needs_shift && !shift_held {
-            enigo
-                .key(Key::Shift, Direction::Press)
-                .map_err(|e| format!("Failed to press Shift: {e}"))?;
-            shift_held = true;
-            std::thread::sleep(TYPE_INTER_CHAR_DELAY);
-        } else if !needs_shift && shift_held {
-            enigo
-                .key(Key::Shift, Direction::Release)
-                .map_err(|e| format!("Failed to release Shift: {e}"))?;
-            shift_held = false;
+            if needs_shift && !shift_held {
+                post_key(&source, KEYCODE_SHIFT, true, false)?;
+                shift_held = true;
+                std::thread::sleep(TYPE_INTER_CHAR_DELAY);
+            } else if !needs_shift && shift_held {
+                post_key(&source, KEYCODE_SHIFT, false, false)?;
+                shift_held = false;
+                std::thread::sleep(TYPE_INTER_CHAR_DELAY);
+            }
+
+            post_key(&source, keycode, true, shift_held)?;
+            post_key(&source, keycode, false, shift_held)?;
             std::thread::sleep(TYPE_INTER_CHAR_DELAY);
         }
+        Ok(())
+    })();
 
-        enigo
-            .key(Key::Other(keycode as u32), Direction::Click)
-            .map_err(|e| format!("Failed to type char {ch:?} (keycode {keycode}): {e}"))?;
-        std::thread::sleep(TYPE_INTER_CHAR_DELAY);
-    }
-
+    // Whatever happened above, never leave the virtual Shift stuck down.
     if shift_held {
-        enigo
-            .key(Key::Shift, Direction::Release)
-            .map_err(|e| format!("Failed to release Shift: {e}"))?;
+        let _ = post_key(&source, KEYCODE_SHIFT, false, false);
     }
-
-    Ok(())
+    result
 }
 
 #[cfg(test)]

@@ -757,6 +757,7 @@ name = "mutter"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "core-graphics 0.21.0",
  "cpal",
  "enigo",
  "env_logger",

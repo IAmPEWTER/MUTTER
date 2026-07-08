@@ -31,6 +31,8 @@ pub fn inject(text: &str) {
     let payload = format!(" {cleaned}");
 
     let result = if frontmost::is_screen_sharing() {
+        // Logged so a garbled-injection report can be pinned to a path.
+        log::info!("inject: Screen Sharing frontmost — keycode path");
         keycodes::type_text(&payload)
     } else {
         type_unicode(&payload)

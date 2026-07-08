@@ -21,8 +21,12 @@ cpal = "0.16"
 # Capture at the device-native rate and resample in software — don't force the
 # hardware clock to 16 kHz (that was the old daemon's Bluetooth-fragile choice).
 rubato = "0.16"
-# enigo posts the real keycode/Unicode CGEvents for text injection.
+# enigo posts the Unicode CGEvents for normal-path text injection.
 enigo = "0.6"
+# Screen Sharing keycode path posts its own CGEvents from a HIDSystemState
+# source (keycodes.rs) — enigo's Private source + extra flags garbled through
+# the Screen Sharing forwarder. Same version enigo already pulls in.
+core-graphics = "0.21"
 anyhow = "1"
 serde_json = "1"
 log = "0.4"

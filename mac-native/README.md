@@ -46,7 +46,23 @@ macOS TCC grants attach to a bundle identity, not a bare binary, and Accessibili
 ## Troubleshooting
 
 - **Nothing types on fn-hold** — check `~/Library/Logs/mutter/app.err.log`. `capturing:` on fn-down means the tap works. No line = Accessibility not granted (or the tap needs a reload: `launchctl kickstart -k gui/$(id -u)/com.peter.mutter.app`).
+- **`capturing:` every hold, but every transcript "dropped hallucination/empty"** — the default input device is producing silence (classically: headphones in the jack make `External Microphone` the default, and they have no mic). The daemon follows the system default. Confirm and fix:
+  ```sh
+  SwitchAudioSource -c -t input
+  ffmpeg -f avfoundation -i ":default" -t 3 -y /tmp/m.wav \
+    && ffmpeg -i /tmp/m.wav -af volumedetect -f null - 2>&1 | grep mean_volume
+  # live room ≈ -30 dB; a dead device reads ≈ -78 dB
+  SwitchAudioSource -t input -s "MacBook Air Microphone"
+  ```
 - **Don't test with synthetic fn events.** Fake CGEvents carry fake modifier flags and desync `handy-keys`' fn state (inverts the trigger). Real hardware fn self-corrects every event. Restart the daemon to clear a desync.
+- **Typing doubles, or two `mutter` processes in `ps`** — a stray LaunchAgent is running a second copy (two fn taps, two mic opens). `install.sh` installs exactly one label, `com.peter.mutter.app`; boot out and remove anything else pointing at the bundle: `launchctl list | grep -i mutter`.
+- **Checking the installed binary is current** — strip signatures before comparing, since `install.sh` signs the *bundle* and Info.plist enters the code directory, so CDHash differs by design:
+  ```sh
+  cp /Applications/MUTTER.app/Contents/MacOS/mutter /tmp/a && codesign --remove-signature /tmp/a
+  cp target/release/mutter /tmp/b && codesign --remove-signature /tmp/b
+  shasum -a256 /tmp/a /tmp/b
+  ```
+  A false mismatch costs a needless reinstall — and a new binary hash drops the pinned Accessibility grant.
 - **Offline smoke test** (verifies whisper client + resample on known speech):
   ```sh
   say --file-format=WAVE --data-format=LEF32@48000 -o /tmp/k.wav \

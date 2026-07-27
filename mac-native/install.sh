@@ -48,7 +48,14 @@ mkdir -p "$LOGDIR" "$(dirname "$PLIST")"
 sed "s|__HOME__|$HOME|g" "$HERE/com.peter.mutter.app.plist" > "$PLIST"
 
 echo "-- (re)loading daemon --"
+# bootout returns before launchd has actually released the label; bootstrapping
+# into the gap fails with "Bootstrap failed: 5: Input/output error". Wait for
+# the service to really be gone.
 launchctl bootout "gui/$(id -u)/${IDENT}" 2>/dev/null || true
+for _ in $(seq 1 50); do
+    launchctl print "gui/$(id -u)/${IDENT}" >/dev/null 2>&1 || break
+    sleep 0.1
+done
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 sleep 2
 

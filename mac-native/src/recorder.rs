@@ -157,13 +157,43 @@ fn worker_loop(cmd_rx: Receiver<Cmd>) {
     }
 }
 
-/// Open the default input device at its native config and start pushing
+/// Hints that identify a Mac's own built-in mic by name (ported verbatim from
+/// the Python daemon's `stt._builtin_input_device`).
+const BUILTIN_HINTS: &[&str] = &[
+    "MacBook",
+    "iMac",
+    "Mac mini",
+    "Mac Studio",
+    "Mac Pro",
+    "Built-in",
+];
+
+fn is_builtin_mic(name: &str) -> bool {
+    name.contains("Microphone") && BUILTIN_HINTS.iter().any(|h| name.contains(h))
+}
+
+/// The Mac's built-in microphone, never the system-default input (**R3**).
+/// A Bluetooth or headphone-jack default captures silence that presents as a
+/// successful recording — see `DECISIONS.md`. Falls back to the default only on
+/// a Mac with no built-in mic.
+fn input_device(host: &cpal::Host) -> Result<cpal::Device> {
+    if let Ok(devices) = host.input_devices() {
+        for d in devices {
+            if d.name().is_ok_and(|n| is_builtin_mic(&n)) {
+                return Ok(d);
+            }
+        }
+    }
+    log::warn!("no built-in mic found; falling back to the system-default input");
+    host.default_input_device()
+        .ok_or_else(|| anyhow!("no default input device"))
+}
+
+/// Open the built-in input device at its native config and start pushing
 /// downmixed mono f32 into a shared buffer.
 fn build_stream() -> Result<Active> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or_else(|| anyhow!("no default input device"))?;
+    let device = input_device(&host)?;
     let supported = device
         .default_input_config()
         .map_err(|e| anyhow!("default input config: {e}"))?;
@@ -242,5 +272,42 @@ fn push_mono<T: Copy>(
     for frame in data.chunks(channels) {
         let sum: f32 = frame.iter().map(|&s| to_f32(s)).sum();
         buf.push(sum / channels as f32);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_builtin_mic;
+
+    #[test]
+    fn matches_builtin_mics_only() {
+        assert!(is_builtin_mic("MacBook Air Microphone"));
+        assert!(is_builtin_mic("MacBook Pro Microphone"));
+        assert!(is_builtin_mic("Built-in Microphone"));
+        assert!(is_builtin_mic("iMac Microphone"));
+
+        // The two failure modes R3 exists to avoid.
+        assert!(!is_builtin_mic("External Microphone")); // headphone jack, no mic
+        assert!(!is_builtin_mic("AirPods Pro")); // Bluetooth → A2DP/HFP switch
+        assert!(!is_builtin_mic("BlackHole 2ch"));
+        assert!(!is_builtin_mic("MacBook Air Speakers")); // not an input at all
+    }
+
+    /// R3 against real hardware: the built-in mic wins even when the system
+    /// default is something else. Set the default to a non-built-in input
+    /// (`SwitchAudioSource -t input -s "External Microphone"`) before running:
+    ///   cargo test --release -- --ignored picks_builtin
+    #[test]
+    #[ignore = "needs real audio hardware; assert only holds on a Mac with a built-in mic"]
+    fn picks_builtin_over_system_default() {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        let host = cpal::default_host();
+        let default = host
+            .default_input_device()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_else(|| "?".into());
+        let chosen = super::input_device(&host).unwrap().name().unwrap();
+        eprintln!("system default: {default}\nmutter chose:   {chosen}");
+        assert!(super::is_builtin_mic(&chosen), "chose {chosen}");
     }
 }

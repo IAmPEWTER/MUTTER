@@ -22,10 +22,12 @@
 
 mod frontmost;
 mod hallucination;
+mod hardware;
 mod inject;
 mod keycodes;
 mod recorder;
 mod resample;
+mod speech;
 mod whisper;
 
 use std::sync::mpsc::{self, Sender};
@@ -88,17 +90,33 @@ fn main() {
 
     // The fn event loop. Never does slow work: press starts capture, release
     // stops it (bounded) and hands the clip to the worker.
+    //
+    // `hardware::Watch` runs alongside the hold to answer "did this press come
+    // from this Mac's own keyboard?" — a Screen-Sharing-forwarded fn is
+    // identical by keycode but never moves the hardware flag state. Recording
+    // still starts immediately, so the check costs a real dictation nothing.
+    let mut fn_watch: Option<hardware::Watch> = None;
     loop {
         match manager.recv() {
             Ok(event) => match event.state {
                 HotkeyState::Pressed => {
+                    fn_watch = Some(hardware::Watch::start());
                     inject::set_system_muted(true);
                     recorder.start();
                 }
                 HotkeyState::Released => {
                     inject::set_system_muted(false);
                     let clip = recorder.stop();
-                    if !clip.samples.is_empty() {
+                    // `None` means a release with no matching press we saw;
+                    // treat it as local so a state glitch can't eat dictation.
+                    let from_this_keyboard = fn_watch.take().is_none_or(hardware::Watch::finish);
+                    if !from_this_keyboard {
+                        log::info!(
+                            "fn was not physically down — forwarded press (Screen Sharing); \
+                             dropping {} samples without transcribing",
+                            clip.samples.len()
+                        );
+                    } else if !clip.samples.is_empty() {
                         if let Err(e) = tx.send(clip) {
                             log::error!("transcribe worker gone; dropping clip: {e}");
                         }
@@ -124,6 +142,19 @@ fn spawn_transcribe_worker(client: Client) -> Sender<Clip> {
             let pcm16k = resample::to_16k(&clip.samples, clip.sample_rate);
             if pcm16k.len() < MIN_CLIP_SAMPLES {
                 log::info!("clip too short ({} ms); ignoring", pcm16k.len() / 16);
+                continue;
+            }
+            // R4: silence must never reach whisper — it answers with boilerplate.
+            let speech = speech::detect(&pcm16k, 16_000);
+            if !speech.is_speech {
+                log::info!(
+                    "no speech in {} ms (threshold {:.0}, {} loud blocks, longest run {}); \
+                     not transcribing",
+                    pcm16k.len() / 16,
+                    speech.threshold,
+                    speech.loud_blocks,
+                    speech.longest_run_blocks
+                );
                 continue;
             }
             match client.transcribe(&pcm16k, 16_000, Some(LANGUAGE)) {

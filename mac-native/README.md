@@ -20,6 +20,8 @@ The Python daemon's fragility was 100% its audio + event-tap layer. Two root cau
 | `whisper.rs` | unix-socket client for the shared MLX whisper service |
 | `resample.rs` | device-native rate → 16 kHz (whisper hardcodes /16000) |
 | `frontmost.rs` | "is Screen Sharing frontmost?" via LaunchServices (`lsappinfo`) |
+| `hardware.rs` | was fn *physically* down? drops Screen-Sharing-forwarded presses |
+| `speech.rs` | **R4** acoustic gate — silence never reaches whisper |
 | `hallucination.rs` | drops whisper silence-boilerplate ("You", "Thank you.") before typing |
 | `keycodes.rs` | Screen-Sharing keycode typing (Cmd+V crosses to the remote) |
 | `inject.rs` | normal Unicode typing + clipboard fallback + mute-while-recording |
@@ -52,7 +54,9 @@ macOS TCC grants attach to a bundle identity, not a bare binary, and Accessibili
     && ffmpeg -i /tmp/m.wav -af volumedetect -f null - 2>&1 | grep mean_volume
   # live room ≈ -30 dB; a dead device reads ≈ -78 dB
   ```
-- **Don't test with synthetic fn events.** Fake CGEvents carry fake modifier flags and desync `handy-keys`' fn state (inverts the trigger). Real hardware fn self-corrects every event. Restart the daemon to clear a desync.
+- **Don't test with synthetic fn events.** Fake CGEvents carry fake modifier flags and desync `handy-keys`' fn state (inverts the trigger). Real hardware fn self-corrects every event. Restart the daemon to clear a desync. They also can't reproduce a Screen-Sharing forward: posting to `kCGHIDEventTap` *does* move HID state, so a synthetic press passes `hardware.rs` like a local one. Only a real forwarded press exercises that path.
+- **Nothing types while screen-shared into this Mac** — expected. `fn was not physically down — forwarded press` in the log means `hardware.rs` dropped a forwarded fn: the remote operator's own daemon does the dictation and types into the session via `keycodes.rs`. Dictating at this Mac's own keyboard is unaffected.
+- **`no speech in N ms` on a hold you spoke during** — R4 (`speech.rs`) rejected the clip. The line carries the threshold, loud-block count and longest run; compare against `capturing:` to see which device was open. A threshold far above 300 means the room floor is high (check input gain — 100 % put code-mac's empty-room floor at int16 RMS ~1030).
 - **Typing doubles, or two `mutter` processes in `ps`** — a stray LaunchAgent is running a second copy (two fn taps, two mic opens). `install.sh` installs exactly one label, `com.peter.mutter.app`; boot out and remove anything else pointing at the bundle: `launchctl list | grep -i mutter`.
 - **Checking the installed binary is current** — strip signatures before comparing, since `install.sh` signs the *bundle* and Info.plist enters the code directory, so CDHash differs by design:
   ```sh

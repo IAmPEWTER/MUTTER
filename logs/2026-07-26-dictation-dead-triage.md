@@ -58,7 +58,16 @@ has `csreq = NULL`, `auth_value = 2`; the new binary logged `capturing:` on a
 real fn-hold). The README's "every build needs an off/on toggle" did not hold
 here — worth re-checking before repeating that claim.
 
-## OPEN — hallucinations escape the filter (unresolved)
+## ~~OPEN~~ RESOLVED 2026-08-05 — hallucinations escape the filter
+
+Root cause was not the filter and not this machine's noise floor: Screen Sharing
+forwards fn as a real `keycode=63`, so code-mac recorded its empty room on every
+remote dictation. Fixed by `hardware.rs` (physical-fn check) + `speech.rs` (R4
+restored). The "R4 verbatim would not fix this machine" note below still holds
+and is why the threshold is now relative. See
+`2026-08-05-hallucination-root-fix.md`.
+
+## Original OPEN note
 Whisper boilerplate reaching the cursor is **not** a filter that is off. It is
 compiled in and unconditional (`main.rs:130`). It has holes, and nothing
 upstream of it stops silence.

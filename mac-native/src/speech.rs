@@ -233,6 +233,19 @@ mod tests {
     /// ```sh
     /// MUTTER_CLIPS=/path/to/clips cargo test --release -- --ignored fixtures
     /// ```
+    ///
+    /// Recording a fresh set (`:1` is the built-in mic — check
+    /// `ffmpeg -f avfoundation -list_devices true -i ""`). Record the ambient
+    /// ones in the room the daemon actually runs in, saying nothing:
+    ///
+    /// ```sh
+    /// for i in 1 2 3 4 5 6; do
+    ///   ffmpeg -f avfoundation -i ":1" -t 5 -ar 16000 -ac 1 -y amb$i.wav
+    /// done
+    /// # speech over the real acoustic path, not a clean TTS file:
+    /// ffmpeg -f avfoundation -i ":1" -t 6 -ar 16000 -ac 1 -y spk.wav &
+    /// sleep 0.5; say -v Samantha "commit the change and push it"; wait
+    /// ```
     #[test]
     #[ignore = "needs MUTTER_CLIPS pointing at recorded WAV fixtures"]
     fn fixtures_match_measured_behavior() {

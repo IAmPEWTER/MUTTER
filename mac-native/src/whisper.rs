@@ -1,4 +1,4 @@
-//! Client for the shared MLX-whisper daemon (`~/Documents/services/whisper/`).
+//! Client for the shared STT daemon (`~/Documents/services/stt/`).
 //!
 //! MUTTER keeps its ASR brain out-of-process: a single always-warm model,
 //! shared by every consumer, reached over a unix socket. This daemon never

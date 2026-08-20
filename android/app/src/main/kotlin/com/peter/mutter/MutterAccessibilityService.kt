@@ -30,7 +30,7 @@ class MutterAccessibilityService : AccessibilityService() {
     // text in spoken order across holds.
     private val capturing = AtomicBoolean(false)
 
-    private var recorder: AudioRecorder? = null
+    private val recorder = AudioRecorder()
     private lateinit var engine: WhisperEngine
     private lateinit var segmenter: VadSegmenter
     private lateinit var downloader: ModelDownloader
@@ -84,19 +84,21 @@ class MutterAccessibilityService : AccessibilityService() {
         }
         registerRecycleReceiver()
         DailyRecycler.arm(this)
+        // Open the HAL input now so the first key-down only has to leave
+        // standby instead of paying the whole mic open.
+        modelExec.execute { recorder.prepare() }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         Log.i(tag, "service unbinding")
-        try { recorder?.stop() } catch (_: Throwable) {}
-        recorder = null
+        recorder.release()
         segmenter.release()
         engine.release()
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
-        try { recorder?.stop() } catch (_: Throwable) {}
+        recorder.release()
         recycleReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) {} }
         recycleReceiver = null
         DailyRecycler.disarm(this)
@@ -163,26 +165,30 @@ class MutterAccessibilityService : AccessibilityService() {
         // Clipboard snapshot rides the FIFO worker so it lands after the
         // previous hold's finish and before this hold's first chunk.
         worker.execute { injector.begin() }
+        // Foreground FIRST. Android hands a background app zeros instead of an
+        // error (developer.android.com/media/platform/sharing-audio-input), and
+        // an accessibility service with no UI on top counts as background — so
+        // starting the mic before this silently ate the start of every hold.
+        promoteToForeground()
         if (!startRecording()) {
+            demoteForeground()
             capturing.set(false)
             worker.execute { injector.finish(leftover = null) } // undo begin
             haptic(50)
             return false
         }
-        promoteToForeground()
         return true
     }
 
     private fun handleUp(): Boolean {
         if (!capturing.compareAndSet(true, false)) return false
-        val rec = recorder
-        recorder = null
         // stop() joins the capture thread, so every cut chunk has already been
         // queued. flush() then queues the final partial chunk; both land on the
         // FIFO worker ahead of the end-of-hold task below.
-        try { rec?.stop() } catch (t: Throwable) { Log.e(tag, "stop failed", t) }
+        try { recorder.stop() } catch (t: Throwable) { Log.e(tag, "stop failed", t) }
         segmenter.flush()
         demoteForeground()
+        modelExec.execute { recorder.prepare() } // stay warm for the next hold
 
         val h = hold
         worker.execute { endHold(h) }
@@ -204,12 +210,8 @@ class MutterAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startRecording(): Boolean {
-        val r = AudioRecorder(onWindow = { window -> segmenter.feed(window) })
-        val ok = r.start()
-        if (ok) recorder = r
-        return ok
-    }
+    private fun startRecording(): Boolean =
+        recorder.start { window -> segmenter.feed(window) }
 
     // One streamed chunk: transcribe and inject in spoken order. Runs on the
     // single `worker` thread; `h` is this chunk's own hold, so spacing and
@@ -350,8 +352,7 @@ class MutterAccessibilityService : AccessibilityService() {
 
     private fun abortHold() {
         capturing.set(false)
-        try { recorder?.stop() } catch (_: Throwable) {}
-        recorder = null
+        try { recorder.stop() } catch (_: Throwable) {}
         segmenter.reset() // drop the in-flight hold's buffered audio
         val h = hold
         worker.execute { endHold(h) } // FIFO: after any already-queued chunks

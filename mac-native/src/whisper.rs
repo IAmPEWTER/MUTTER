@@ -32,16 +32,32 @@ use std::time::Duration;
 const TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Resolve the daemon's socket path exactly like `client.py`'s
-/// `DEFAULT_SOCK_PATH`: `$WHISPER_SOCK` if set and non-empty, else
-/// `$TMPDIR/whisper.sock`.
+/// `_default_sock()`: `$STT_SOCK`, else `$WHISPER_SOCK`, else whichever
+/// socket is actually present.
+///
+/// The service was named "whisper" until 2026-08-20. Probing the legacy
+/// path keeps this binary working against a daemon that has not been
+/// updated yet, so the two can be upgraded in either order.
 pub fn sock_path() -> PathBuf {
-    match std::env::var("WHISPER_SOCK") {
-        Ok(p) if !p.is_empty() => PathBuf::from(p),
-        _ => std::env::temp_dir().join("whisper.sock"),
+    for var in ["STT_SOCK", "WHISPER_SOCK"] {
+        if let Ok(p) = std::env::var(var) {
+            if !p.is_empty() {
+                return PathBuf::from(p);
+            }
+        }
     }
+    let tmp = std::env::temp_dir();
+    let current = tmp.join("stt.sock");
+    if !current.exists() {
+        let legacy = tmp.join("whisper.sock");
+        if legacy.exists() {
+            return legacy;
+        }
+    }
+    current
 }
 
-/// Thin, stateless client for the whisper unix-socket daemon.
+/// Thin, stateless client for the STT unix-socket daemon.
 pub struct Client {
     sock_path: PathBuf,
 }

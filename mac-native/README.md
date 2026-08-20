@@ -17,12 +17,12 @@ The Python daemon's fragility was 100% its audio + event-tap layer. Two root cau
 |---|---|
 | `main.rs` | fn event loop + FIFO transcribe worker; wires it all together |
 | `recorder.rs` | cpal capture on a worker thread; bounded teardown (**decision 2**) |
-| `whisper.rs` | unix-socket client for the shared MLX whisper service |
-| `resample.rs` | device-native rate → 16 kHz (whisper hardcodes /16000) |
+| `whisper.rs` | unix-socket client for the shared STT service |
+| `resample.rs` | device-native rate → 16 kHz (STT hardcodes /16000) |
 | `frontmost.rs` | "is Screen Sharing frontmost?" via LaunchServices (`lsappinfo`) |
 | `hardware.rs` | was fn *physically* down? drops Screen-Sharing-forwarded presses |
-| `speech.rs` | **R4** acoustic gate — silence never reaches whisper |
-| `hallucination.rs` | drops whisper silence-boilerplate ("You", "Thank you.") before typing |
+| `speech.rs` | **R4** acoustic gate — silence never reaches the STT service |
+| `hallucination.rs` | drops STT silence-boilerplate ("You", "Thank you.") before typing |
 | `keycodes.rs` | Screen-Sharing keycode typing (Cmd+V crosses to the remote) |
 | `inject.rs` | normal Unicode typing + clipboard fallback + mute-while-recording |
 
@@ -33,7 +33,7 @@ The Python daemon's fragility was 100% its audio + event-tap layer. Two root cau
 ./uninstall.sh        # stop + remove (add --purge to also drop logs)
 ```
 
-Requires Rust (`rustup`) and the shared MLX whisper service running (`~/Documents/services/whisper/`).
+Requires Rust (`rustup`) and the shared STT service running (`~/Documents/services/stt/`).
 
 ### Permissions (first run, per machine)
 - **Accessibility** — read the fn key + type. Grant manually: System Settings → Privacy & Security → Accessibility → enable **MUTTER**. `install.sh` opens the pane.
@@ -48,7 +48,7 @@ macOS TCC grants attach to a bundle identity, not a bare binary, and Accessibili
 ## Troubleshooting
 
 - **Nothing types on fn-hold** — check `~/Library/Logs/mutter/app.err.log`. `capturing:` on fn-down means the tap works. No line = Accessibility not granted (or the tap needs a reload: `launchctl kickstart -k gui/$(id -u)/com.peter.mutter.app`).
-- **`capturing:` every hold, but every transcript "dropped hallucination/empty"** — silence reached whisper. Check *which* device the `capturing:` line names: it must be the built-in mic (**R3** — `recorder.rs` picks it regardless of the system default). If it names anything else, the built-in wasn't found and the fallback ran; the preceding `no built-in mic found` warning says so. Measure the device:
+- **`capturing:` every hold, but every transcript "dropped hallucination/empty"** — silence reached the STT service. Check *which* device the `capturing:` line names: it must be the built-in mic (**R3** — `recorder.rs` picks it regardless of the system default). If it names anything else, the built-in wasn't found and the fallback ran; the preceding `no built-in mic found` warning says so. Measure the device:
   ```sh
   ffmpeg -f avfoundation -i ":default" -t 3 -y /tmp/m.wav \
     && ffmpeg -i /tmp/m.wav -af volumedetect -f null - 2>&1 | grep mean_volume
@@ -65,7 +65,7 @@ macOS TCC grants attach to a bundle identity, not a bare binary, and Accessibili
   shasum -a256 /tmp/a /tmp/b
   ```
   A false mismatch costs a needless reinstall — and a new binary hash drops the pinned Accessibility grant.
-- **Offline smoke test** (verifies whisper client + resample on known speech):
+- **Offline smoke test** (verifies STT client + resample on known speech):
   ```sh
   say --file-format=WAVE --data-format=LEF32@48000 -o /tmp/k.wav \
     "the quick brown fox jumps over the lazy dog"

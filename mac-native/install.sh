@@ -7,7 +7,7 @@
 # (no Tauri/Xcode toolchain needed), installs the LaunchAgent, and loads it.
 # Idempotent — safe to re-run to update after a `git pull`.
 #
-# Requires: Rust (rustup), and the shared MLX whisper service running.
+# Requires: Rust (rustup), and the shared STT service running.
 set -euo pipefail
 
 BUNDLE="/Applications/MUTTER.app"
@@ -59,13 +59,19 @@ done
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 sleep 2
 
-# --- whisper service sanity (check the socket the daemon actually uses) -----
-WSOCK="${WHISPER_SOCK:-${TMPDIR:-/tmp/}whisper.sock}"
+# --- STT service sanity (check the socket the daemon actually uses) --------
+# Prefer stt.sock; fall back to the pre-2026-08-20 whisper.sock so this
+# installer is happy against a daemon that has not been migrated yet.
+WSOCK="${STT_SOCK:-${WHISPER_SOCK:-}}"
+if [[ -z "$WSOCK" ]]; then
+    WSOCK="${TMPDIR:-/tmp/}stt.sock"
+    [[ -S "$WSOCK" ]] || WSOCK="${TMPDIR:-/tmp/}whisper.sock"
+fi
 if [ ! -S "$WSOCK" ]; then
     echo ""
-    echo "WARNING: whisper socket not found at $WSOCK."
-    echo "         MUTTER needs the shared MLX whisper service running"
-    echo "         (see ~/Documents/services/whisper/)."
+    echo "WARNING: STT socket not found at $WSOCK."
+    echo "         MUTTER needs the shared STT service running"
+    echo "         (see ~/Documents/services/stt/)."
 fi
 
 echo ""

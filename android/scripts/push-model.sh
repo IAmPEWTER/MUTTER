@@ -2,24 +2,28 @@
 # Put the speech model on a connected device/emulator without making the app
 # download it, so `./gradlew :app:connectedDebugAndroidTest` can run.
 #
-# Files are cached under build/model-cache/ and SHA-256 verified against the
-# canonical k2-fsa release — the same hashes SttModel.kt carries.
+# Files are cached under build/model-cache/ and SHA-256 verified. The file list,
+# URLs and hashes are read out of SttModel.kt — there is no second copy to drift.
 set -euo pipefail
 
 PKG="${PKG:-com.peter.mutter.debug}"
-DIR="parakeet-tdt-0.6b-v2-int8"
-HF="https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main"
-GH="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models"
-
-# filename<TAB>url<TAB>sha256
-ASSETS=$(cat <<EOF
-encoder.int8.onnx	$HF/encoder.int8.onnx	a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab
-decoder.int8.onnx	$HF/decoder.int8.onnx	b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e
-joiner.int8.onnx	$HF/joiner.int8.onnx	7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2
-tokens.txt	$HF/tokens.txt	ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d
-silero_vad.onnx	$GH/silero_vad.onnx	9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6
-EOF
-)
+# Everything below is derived from SttModel.kt so the two can never disagree
+# about which files, from where, at which hash.
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/app/src/main/kotlin/com/peter/mutter/SttModel.kt"
+read -r DIR ASSETS <<<"$(python3 - "$SRC" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+const = dict(re.findall(r'const val (\w+)\s*=\s*"([^"]*)"', src))
+rows = []
+for url, name, size, sha in re.findall(
+        r'Asset\(\s*"([^"]+)",\s*(\w+),\s*([\d_]+)L,\s*\n?\s*"([0-9a-f]{64})"', src):
+    url = re.sub(r'\$(\w+)', lambda m: const[m.group(1)], url)
+    rows.append(f"{const[name]}|{url}|{sha}")
+print(const["DIR"], ";".join(rows))
+PY
+)"
+[ -n "$DIR" ] && [ -n "$ASSETS" ] || { echo "ERROR: could not parse SttModel.kt" >&2; exit 1; }
+ASSETS=$(echo "$ASSETS" | tr ';' '\n' | tr '|' '\t')
 
 CACHE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/build/model-cache"
 mkdir -p "$CACHE"

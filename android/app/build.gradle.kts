@@ -21,9 +21,12 @@ android {
     defaultConfig {
         applicationId = "com.peter.mutter"
         minSdk = 34
-        targetSdk = 36
-        versionCode = 9
-        versionName = "0.8.1"
+        // Held at 35 on purpose. 36 opts into the Android 16 behaviour changes,
+        // and it was raised in the same session that broke dictation for a
+        // benefit this app never needed. 35 is what the last working build ran.
+        targetSdk = 35
+        versionCode = 10
+        versionName = "0.8.2"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

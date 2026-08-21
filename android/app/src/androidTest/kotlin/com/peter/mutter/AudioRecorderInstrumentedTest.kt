@@ -1,8 +1,11 @@
 package com.peter.mutter
 
+import android.Manifest
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.rule.GrantPermissionRule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
@@ -22,6 +25,12 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @RunWith(AndroidJUnit4::class)
 class AudioRecorderInstrumentedTest {
+
+    // The task reinstalls the app, which drops the runtime grant; without this
+    // the tests fail for a reason that has nothing to do with the code.
+    @get:Rule
+    val micPermission: GrantPermissionRule =
+        GrantPermissionRule.grant(Manifest.permission.RECORD_AUDIO)
 
     @Test
     fun delivers_windows_of_the_expected_size() {

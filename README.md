@@ -4,7 +4,7 @@
 
 # MUTTER
 
-Hold a key, speak, release — your words appear typed at the cursor. Local Whisper, no cloud.
+Hold a key, speak, release — your words appear typed at the cursor. On-device, no cloud. Both platforms run parakeet-tdt-0.6b-v2 — Mac via the shared STT service, Android via sherpa-onnx.
 
 | Platform | Where | Status |
 |---|---|---|

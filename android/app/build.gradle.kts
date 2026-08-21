@@ -7,7 +7,7 @@ plugins {
 // Idempotent — skips if the file is already present with the right SHA-256.
 val fetchSherpaOnnx by tasks.registering(Exec::class) {
     val script = file("${rootDir}/scripts/fetch-libs.sh")
-    val aar = file("${projectDir}/libs/sherpa-onnx-1.13.2.aar")
+    val aar = file("${projectDir}/libs/sherpa-onnx-1.13.6.aar")
     inputs.file(script)
     outputs.file(aar)
     commandLine("bash", script.absolutePath)
@@ -16,12 +16,12 @@ tasks.named("preBuild").configure { dependsOn(fetchSherpaOnnx) }
 
 android {
     namespace = "com.peter.mutter"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.peter.mutter"
         minSdk = 34
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 6
         versionName = "0.6.0"
 
@@ -49,8 +49,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     buildFeatures {
@@ -81,16 +83,16 @@ android {
 }
 
 dependencies {
-    implementation("androidx.core:core-ktx:1.13.1")
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("com.google.android.material:material:1.12.0")
-    implementation("androidx.constraintlayout:constraintlayout:2.1.4")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("androidx.core:core-ktx:1.18.0")
+    implementation("androidx.appcompat:appcompat:1.8.0")
+    implementation("com.google.android.material:material:1.14.0")
+    implementation("androidx.constraintlayout:constraintlayout:2.2.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
-    implementation(files("libs/sherpa-onnx-1.13.2.aar"))
+    implementation(files("libs/sherpa-onnx-1.13.6.aar"))
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlin:kotlin-test:2.0.21")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:2.2.21")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     testImplementation("org.json:json:20240303")
 }

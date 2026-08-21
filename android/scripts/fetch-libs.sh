@@ -8,10 +8,10 @@
 
 set -euo pipefail
 
-VERSION="1.13.2"
+VERSION="1.13.6"
 AAR_NAME="sherpa-onnx-${VERSION}.aar"
 URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${VERSION}/${AAR_NAME}"
-EXPECTED_SHA256="aa5505c0ec4f8bdaee5f214a64ba3012be64f2aecc022e82a64f33392b8dd245"
+EXPECTED_SHA256="0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIBS_DIR="$(cd "$SCRIPT_DIR/../app/libs" 2>/dev/null && pwd || true)"

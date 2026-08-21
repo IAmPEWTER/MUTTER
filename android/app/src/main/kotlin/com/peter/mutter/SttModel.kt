@@ -90,28 +90,35 @@ object SttModel {
         ),
     )
 
-    /**
-     * What shipped through v0.6.0. Kept loadable so an install that still has
-     * these files dictates with them instead of waiting on a download. No
-     * hashes were recorded when it shipped, so it is fallback-only.
-     */
+    /** What shipped through v0.6.0 — the last build known to dictate. */
     val DISTIL_SMALL_EN = Spec(
         dir = "distil-small.en",
         family = Family.WHISPER,
         modelType = "whisper",
         assets = listOf(
-            Asset("$WHISPER_HF/distil-small.en-encoder.int8.onnx", ENCODER, 102_961_431L),
-            Asset("$WHISPER_HF/distil-small.en-decoder.int8.onnx", DECODER, 195_079_097L),
-            Asset("$WHISPER_HF/distil-small.en-tokens.txt", TOKENS, 835_554L),
+            Asset("$WHISPER_HF/distil-small.en-encoder.int8.onnx", ENCODER, 102_961_431L,
+                "397a76d2308c2c1ec91a4ecc12f20fede69bb17be41a1cef050993520328beca"),
+            Asset("$WHISPER_HF/distil-small.en-decoder.int8.onnx", DECODER, 195_079_097L,
+                "3074092bca078786ecda9c9e88449f14e9ebde1d60be4d41de8cacda55e065e0"),
+            Asset("$WHISPER_HF/distil-small.en-tokens.txt", TOKENS, 835_554L,
+                "306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930"),
             VAD_ASSET,
         ),
     )
 
-    /** What a fresh install fetches. */
-    val PREFERRED = PARAKEET
+    /**
+     * What a fresh install fetches.
+     *
+     * Back to v0.6.0's model. Parakeet is the more accurate engine and stays
+     * loadable, but it was swapped in during the same session that broke
+     * dictation, and it is the larger variable: 620 MB to fetch against 291 MB,
+     * and ~740 MB resident against ~660 MB. Until a phone that failed is seen
+     * to dictate again, the model is the known-good one.
+     */
+    val PREFERRED = DISTIL_SMALL_EN
 
     /** Preferred first — [ModelDownloader.resolve] loads the first one present. */
-    val KNOWN = listOf(PARAKEET, DISTIL_SMALL_EN)
+    val KNOWN = listOf(DISTIL_SMALL_EN, PARAKEET)
 
     /** The preferred model's assets. Kept for call sites that only ever fetch. */
     val ASSETS = PREFERRED.assets

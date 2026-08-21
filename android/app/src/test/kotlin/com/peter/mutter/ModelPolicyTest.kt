@@ -7,7 +7,9 @@ import kotlin.test.assertSame
 class ModelPolicyTest {
 
     private val preferred = SttModel.PREFERRED.dir
-    private val previous = SttModel.DISTIL_SMALL_EN.dir
+    // "Some model that is not the preferred one" — never a named one, so these
+    // stay true through a model swap instead of quietly encoding this week's.
+    private val previous = SttModel.KNOWN.first { it !== SttModel.PREFERRED }.dir
 
     // The v0.7.0 outage, as a test: pruning ran on service connect regardless
     // of whether the new model had arrived, so the phone kept neither.
@@ -38,9 +40,10 @@ class ModelPolicyTest {
     // The fallback exists so a model swap never darkens the app; the order is
     // what makes the new model win once it lands.
     @Test
-    fun the_preferred_model_is_first_and_the_previous_one_is_kept() {
+    fun the_preferred_model_is_first_and_a_fallback_always_exists() {
         assertSame(SttModel.PREFERRED, SttModel.KNOWN.first())
-        assertEquals(true, SttModel.KNOWN.contains(SttModel.DISTIL_SMALL_EN))
+        // Without a second entry, swapping models darks the app — v0.7.0.
+        assertEquals(true, SttModel.KNOWN.size >= 2)
     }
 
     // A missing VAD degrades segmentation to RMS; it must not make a model that
@@ -58,8 +61,13 @@ class ModelPolicyTest {
 
     @Test
     fun only_a_fully_hashed_model_may_be_fetched() {
+        // Whatever is preferred must be fetchable, or a fresh install is dead.
         assertEquals(true, SttModel.PREFERRED.downloadable)
-        // No hashes were recorded for it when it shipped, so it is load-only.
-        assertEquals(false, SttModel.DISTIL_SMALL_EN.downloadable)
+        val unverifiable = SttModel.PREFERRED.copy(
+            assets = SttModel.PREFERRED.assets.mapIndexed { i, a ->
+                if (i == 0) a.copy(sha256 = null) else a
+            },
+        )
+        assertEquals(false, unverifiable.downloadable)
     }
 }

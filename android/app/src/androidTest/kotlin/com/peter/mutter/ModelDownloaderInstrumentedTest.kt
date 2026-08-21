@@ -27,6 +27,11 @@ class ModelDownloaderInstrumentedTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private val downloader = ModelDownloader(context)
 
+    // Never a named model: these tests stand up "the model that is not the
+    // preferred one", and naming it meant that swapping PREFERRED turned the
+    // fixture into the real model and deleted it mid-suite.
+    private val fallback = SttModel.KNOWN.first { it !== SttModel.PREFERRED }
+
     @Test
     fun downloads_and_verifies_every_asset() {
         val encoder = File(downloader.modelDir(), SttModel.ENCODER)
@@ -68,14 +73,19 @@ class ModelDownloaderInstrumentedTest {
         val restore = encoder.exists()
         if (restore) assertTrue(encoder.renameTo(File(downloader.modelDir(), "held.tmp")))
         try {
-            val previous = File(context.filesDir, "models/${SttModel.DISTIL_SMALL_EN.dir}")
+            val previous = File(context.filesDir, "models/${fallback.dir}")
                 .apply { mkdirs() }
             File(previous, SttModel.ENCODER).writeBytes(ByteArray(1024))
             downloader.pruneSupersededModels()
             assertTrue("pruned the only model the phone could still load", previous.exists())
             previous.deleteRecursively()
         } finally {
-            if (restore) File(downloader.modelDir(), "held.tmp").renameTo(encoder)
+            if (restore) {
+                assertTrue(
+                    "fixture not restored — later tests would see no model",
+                    File(downloader.modelDir(), "held.tmp").renameTo(encoder),
+                )
+            }
         }
     }
 
@@ -90,20 +100,25 @@ class ModelDownloaderInstrumentedTest {
         val encoder = File(downloader.modelDir(), SttModel.ENCODER)
         val restore = encoder.exists()
         if (restore) assertTrue(encoder.renameTo(File(downloader.modelDir(), "held.tmp")))
-        val previous = File(context.filesDir, "models/${SttModel.DISTIL_SMALL_EN.dir}")
+        val previous = File(context.filesDir, "models/${fallback.dir}")
             .apply { mkdirs() }
         try {
-            for (a in SttModel.DISTIL_SMALL_EN.recognizerAssets) {
+            for (a in fallback.recognizerAssets) {
                 RandomAccessFile(File(previous, a.filename), "rw").use { it.setLength(a.size) }
             }
-            assertEquals(SttModel.DISTIL_SMALL_EN, downloader.resolve())
+            assertEquals(fallback, downloader.resolve())
             assertTrue(
                 "VAD should resolve inside the model actually in use",
-                downloader.vadModelPath().contains(SttModel.DISTIL_SMALL_EN.dir),
+                downloader.vadModelPath().contains(fallback.dir),
             )
         } finally {
             previous.deleteRecursively()
-            if (restore) File(downloader.modelDir(), "held.tmp").renameTo(encoder)
+            if (restore) {
+                assertTrue(
+                    "fixture not restored — later tests would see no model",
+                    File(downloader.modelDir(), "held.tmp").renameTo(encoder),
+                )
+            }
         }
         // Preferred model whole again -> the path must move with it.
         assertEquals(SttModel.PREFERRED, downloader.resolve())

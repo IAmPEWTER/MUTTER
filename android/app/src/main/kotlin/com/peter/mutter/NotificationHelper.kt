@@ -77,6 +77,37 @@ object NotificationHelper {
         }
     }
 
+    /**
+     * Model-fetch progress. Rides the low-importance recording channel: this is
+     * information, not an interruption, and it replaces itself in place.
+     */
+    fun notifyProgress(context: Context, title: String, text: String, percent: Int) {
+        try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            val n = Notification.Builder(context, CHANNEL_ID)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setSmallIcon(R.drawable.ic_mic)
+                .setOngoing(true)
+                .setShowWhen(false)
+                .setOnlyAlertOnce(true)
+                .setProgress(100, percent.coerceIn(0, 100), percent < 0)
+                .build()
+            nm.notify(MODEL_NOTIFICATION_ID, n)
+        } catch (t: Throwable) {
+            Log.e("MutterNotif", "notifyProgress failed", t)
+        }
+    }
+
+    fun cancel(context: Context, id: Int) {
+        try {
+            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(id)
+        } catch (t: Throwable) {
+            Log.d("MutterNotif", "cancel failed", t)
+        }
+    }
+
     private fun setupIntent(context: Context): PendingIntent {
         val intent = Intent()
             .setClassName(context, "com.peter.mutter.setup.SetupActivity")

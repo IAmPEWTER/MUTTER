@@ -30,7 +30,7 @@ class SttEngineInstrumentedTest {
         val downloader = ModelDownloader(context)
         assumeTrue("model not on device — run scripts/push-model.sh", downloader.isPresent())
 
-        val engine = SttEngine(downloader.modelDir())
+        val engine = SttEngine(downloader)
         assertTrue("engine failed to load", engine.load())
         try {
             val samples = readWav(

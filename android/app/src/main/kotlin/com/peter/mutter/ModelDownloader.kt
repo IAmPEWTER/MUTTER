@@ -4,6 +4,8 @@ import android.content.Context
 import android.os.storage.StorageManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileOutputStream
@@ -12,77 +14,135 @@ import java.net.URL
 import java.security.MessageDigest
 
 /**
- * Fetches the files named by [SttModel] into filesDir/models/<dir>/.
+ * Fetches [SttModel.PREFERRED] into filesDir/models/<dir>/ and reports which
+ * model the phone can actually load right now.
  *
  * Every download is SHA-256 verified against the canonical k2-fsa release
  * before it is put in place. Size alone used to be the only check, which a
  * truncated resume or a substituted mirror can satisfy — and a model file that
  * is wrong but plausible fails at load time as an opaque native error.
+ *
+ * Nothing here deletes a model the app could still use. That is not a policy,
+ * it is enforced by [pruneSupersededModels] refusing to run until the preferred
+ * model is verified present.
  */
 class ModelDownloader(private val context: Context) {
 
     private val tag = "MutterDL"
 
-    fun modelDir(): File {
-        val dir = File(context.filesDir, "models/${SttModel.DIR}")
-        if (!dir.exists()) dir.mkdirs()
-        return dir
-    }
+    private fun root(): File = File(context.filesDir, "models")
 
-    fun vadModelPath(): String = File(modelDir(), SttModel.VAD).absolutePath
+    fun dirFor(spec: SttModel.Spec): File =
+        File(root(), spec.dir).apply { if (!exists()) mkdirs() }
+
+    /** Where the preferred model lives — the download target. */
+    fun modelDir(): File = dirFor(SttModel.PREFERRED)
 
     /**
-     * Cheap startup check: names and sizes. Hashing 620 MB on every service
-     * connect would cost seconds; the hash is enforced where a bad file can
-     * first appear, at download time.
+     * The best model this phone can load right now, or null if it has none.
+     *
+     * Only the recognizer files are required: a missing VAD costs segmentation
+     * quality, not dictation, and [VadSegmenter] already degrades to RMS. A
+     * model that can transcribe should never be reported as absent.
+     */
+    fun resolve(): SttModel.Spec? = ModelPolicy.resolve(SttModel.KNOWN) { spec ->
+        val dir = File(root(), spec.dir)
+        spec.recognizerAssets.all { File(dir, it.filename).length() == it.size }
+    }
+
+    fun vadModelPath(): String {
+        val spec = resolve() ?: SttModel.PREFERRED
+        return File(dirFor(spec), SttModel.VAD).absolutePath
+    }
+
+    /**
+     * Cheap startup check: names and sizes for the *preferred* model. Hashing
+     * 620 MB on every service connect would cost seconds; the hash is enforced
+     * where a bad file can first appear, at download time.
      */
     fun isPresent(): Boolean {
-        val dir = modelDir()
-        return SttModel.ASSETS.all { File(dir, it.filename).length() == it.size }
+        val dir = File(root(), SttModel.PREFERRED.dir)
+        return SttModel.PREFERRED.assets.all { File(dir, it.filename).length() == it.size }
     }
 
+    /** True when the phone has something to dictate with, preferred or not. */
+    fun hasAnyModel(): Boolean = resolve() != null
+
+    /** Bytes recoverable by dropping models that are no longer the active one. */
+    fun reclaimableBytes(): Long =
+        supersededDirs().sumOf { d -> d.walkBottomUp().filter { it.isFile }.sumOf { it.length() } }
+
+    private fun supersededDirs(): List<File> =
+        root().listFiles()?.filter { it.isDirectory && it.name != SttModel.PREFERRED.dir }.orEmpty()
+
     /**
-     * Delete cached models that are no longer the active one. An app update
-     * that changes models would otherwise leave the old weights on the phone
-     * forever — hundreds of megabytes nothing will ever open again.
+     * Delete the weights of models the app has moved on from.
+     *
+     * Refuses to run unless the preferred model is verified present, which is
+     * the whole safety property: v0.7.0 pruned on service connect regardless
+     * and left installs with no model at all. An update may cost storage until
+     * its download finishes; it may never cost dictation.
      */
-    fun pruneOtherModels() {
-        val root = File(context.filesDir, "models")
-        val stale = root.listFiles()?.filter { it.isDirectory && it.name != SttModel.DIR } ?: return
-        for (dir in stale) {
+    fun pruneSupersededModels() {
+        val allowed = ModelPolicy.prunable(
+            dirNames = supersededDirs().map { it.name },
+            preferredDir = SttModel.PREFERRED.dir,
+            preferredComplete = isPresent(),
+        ).toSet()
+        if (allowed.isEmpty()) {
+            Log.i(tag, "nothing safe to prune (${SttModel.PREFERRED.dir} complete: ${isPresent()})")
+            return
+        }
+        for (dir in supersededDirs().filter { it.name in allowed }) {
             val freed = dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
             if (dir.deleteRecursively()) {
-                Log.i(tag, "removed stale model ${dir.name} (${freed / 1_000_000} MB)")
+                Log.i(tag, "removed superseded model ${dir.name} (${freed / 1_000_000} MB)")
             } else {
-                Log.w(tag, "could not remove stale model ${dir.name}")
+                Log.w(tag, "could not remove superseded model ${dir.name}")
             }
         }
     }
 
+    /**
+     * Serialized across every caller: the setup wizard and [ModelBootstrap] can
+     * both decide the model is missing at the same moment, and two writers on
+     * one .part file produce a size-correct, corrupt download.
+     */
     suspend fun download(
         onProgress: (downloaded: Long, total: Long, file: String) -> Unit,
-    ): Result<Unit> = withContext(Dispatchers.IO) {
-        val dir = modelDir()
-        // Up front, not at the end: an app update that changes models leaves
-        // the previous weights sitting there, and freeing them is what makes
-        // room for these. They are already unreadable — nothing loads from a
-        // directory that is not SttModel.DIR.
-        pruneOtherModels()
-        val total = SttModel.TOTAL_BYTES
-        val needed = SttModel.ASSETS.filterNot { File(dir, it.filename).length() == it.size }
+    ): Result<Unit> = gate.withLock {
+        withContext(Dispatchers.IO) { fetchPreferred(onProgress) }
+    }
+
+    private fun fetchPreferred(
+        onProgress: (downloaded: Long, total: Long, file: String) -> Unit,
+    ): Result<Unit> {
+        val spec = SttModel.PREFERRED
+        val dir = dirFor(spec)
+        val total = spec.totalBytes
+        val needed = spec.assets.filterNot { File(dir, it.filename).length() == it.size }
             .sumOf { it.size }
         val free = allocatableBytes(dir)
         if (free < needed + HEADROOM_BYTES) {
-            return@withContext Result.failure(
+            // Deliberately not solved by deleting the old model first: that
+            // trades a storage problem the user can fix for an app that cannot
+            // dictate. Say what is needed and keep what works.
+            val reclaimable = reclaimableBytes()
+            val hint = if (reclaimable > 0) {
+                " (${reclaimable / 1_000_000} MB frees up once this finishes)"
+            } else {
+                ""
+            }
+            return Result.failure(
                 RuntimeException(
                     "needs ${(needed + HEADROOM_BYTES) / 1_000_000} MB free, " +
-                        "phone has ${free / 1_000_000} MB"
+                        "phone has ${free / 1_000_000} MB$hint"
                 )
             )
         }
         var done = 0L
-        try {
-            for (asset in SttModel.ASSETS) {
+        return try {
+            for (asset in spec.assets) {
                 val target = File(dir, asset.filename)
                 if (target.length() == asset.size) {
                     File(dir, "${asset.filename}.part").delete() // abandoned resume
@@ -95,22 +155,25 @@ class ModelDownloader(private val context: Context) {
                 val digest = sha256(partial)
                 if (digest != asset.sha256) {
                     partial.delete() // a resume onto this would inherit the corruption
-                    return@withContext Result.failure(
+                    return Result.failure(
                         RuntimeException("${asset.filename}: checksum mismatch (got $digest)")
                     )
                 }
                 if (target.exists() && !target.delete()) {
-                    return@withContext Result.failure(
+                    return Result.failure(
                         RuntimeException("could not remove old ${asset.filename}")
                     )
                 }
                 if (!partial.renameTo(target)) {
-                    return@withContext Result.failure(
+                    return Result.failure(
                         RuntimeException("rename failed for ${asset.filename}")
                     )
                 }
                 done += asset.size
             }
+            // Only now, with the replacement verified on disk, is the old one
+            // safe to lose.
+            pruneSupersededModels()
             Result.success(Unit)
         } catch (t: Throwable) {
             Log.e(tag, "download failed", t)
@@ -135,6 +198,7 @@ class ModelDownloader(private val context: Context) {
     private companion object {
         // Android starts misbehaving well before a volume is truly full.
         const val HEADROOM_BYTES = 200_000_000L
+        val gate = Mutex()
     }
 
     private fun fetch(

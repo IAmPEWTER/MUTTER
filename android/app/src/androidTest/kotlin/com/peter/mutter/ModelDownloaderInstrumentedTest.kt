@@ -51,12 +51,31 @@ class ModelDownloaderInstrumentedTest {
     }
 
     @Test
-    fun removes_model_directories_that_are_no_longer_active() {
+    fun removes_superseded_model_directories_once_the_new_one_is_complete() {
+        assumeTrue("run scripts/push-model.sh first", downloader.isPresent())
         val stale = File(context.filesDir, "models/some-retired-model").apply { mkdirs() }
         File(stale, "encoder.onnx").writeBytes(ByteArray(1024))
-        downloader.pruneOtherModels()
-        assertTrue("stale model directory survived", !stale.exists())
+        downloader.pruneSupersededModels()
+        assertTrue("superseded model directory survived", !stale.exists())
         assertTrue("active model directory was removed", downloader.modelDir().exists())
+    }
+
+    /** The v0.7.0 outage: pruning before the replacement landed left no model. */
+    @Test
+    fun keeps_the_old_model_while_the_preferred_one_is_incomplete() {
+        val encoder = File(downloader.modelDir(), SttModel.ENCODER)
+        val restore = encoder.exists()
+        if (restore) assertTrue(encoder.renameTo(File(downloader.modelDir(), "held.tmp")))
+        try {
+            val previous = File(context.filesDir, "models/${SttModel.DISTIL_SMALL_EN.dir}")
+                .apply { mkdirs() }
+            File(previous, SttModel.ENCODER).writeBytes(ByteArray(1024))
+            downloader.pruneSupersededModels()
+            assertTrue("pruned the only model the phone could still load", previous.exists())
+            previous.deleteRecursively()
+        } finally {
+            if (restore) File(downloader.modelDir(), "held.tmp").renameTo(encoder)
+        }
     }
 
     private fun encoderSize() = SttModel.ASSETS.first { it.filename == SttModel.ENCODER }.size

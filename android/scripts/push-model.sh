@@ -14,12 +14,23 @@ read -r DIR ASSETS <<<"$(python3 - "$SRC" <<'PY'
 import re, sys
 src = open(sys.argv[1]).read()
 const = dict(re.findall(r'const val (\w+)\s*=\s*"([^"]*)"', src))
-rows = []
-for url, name, size, sha in re.findall(
-        r'Asset\(\s*"([^"]+)",\s*(\w+),\s*([\d_]+)L,\s*\n?\s*"([0-9a-f]{64})"', src):
-    url = re.sub(r'\$(\w+)', lambda m: const[m.group(1)], url)
-    rows.append(f"{const[name]}|{url}|{sha}")
-print(const["DIR"], ";".join(rows))
+
+def assets(text):
+    rows = []
+    for url, name, _size, sha in re.findall(
+            r'Asset\(\s*"([^"]+)",\s*(\w+),\s*([\d_]+)L,\s*\n?\s*"([0-9a-f]{64})"', text):
+        url = re.sub(r'\$(\w+)', lambda m: const[m.group(1)], url)
+        rows.append(f"{const[name]}|{url}|{sha}")
+    return rows
+
+# Only the preferred spec is fetchable, so only its block is scanned; a
+# fallback spec's files are never downloaded.
+pref = re.search(r'val PREFERRED\s*=\s*(\w+)', src).group(1)
+block = re.search(r'val %s = Spec\((.*?)\n    \)' % pref, src, re.S).group(1)
+rows = assets(block)
+if "VAD_ASSET" in block:
+    rows += assets(re.search(r'val VAD_ASSET = Asset\(.*?\n    \)', src, re.S).group(0))
+print(re.search(r'dir = "([^"]+)"', block).group(1), ";".join(rows))
 PY
 )"
 [ -n "$DIR" ] && [ -n "$ASSETS" ] || { echo "ERROR: could not parse SttModel.kt" >&2; exit 1; }

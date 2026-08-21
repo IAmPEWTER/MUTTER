@@ -30,7 +30,10 @@ class MutterAccessibilityService : AccessibilityService() {
     // text in spoken order across holds.
     private val capturing = AtomicBoolean(false)
 
-    private val recorder = AudioRecorder()
+    // The silence callback, not the foreground promotion, is what reports a
+    // blocked microphone: promotion can fail and capture still work, so
+    // notifying on promotion alone cried wolf.
+    private val recorder = AudioRecorder(onSilenced = { notifyMicBlocked() })
     private lateinit var engine: SttEngine
     private lateinit var segmenter: VadSegmenter
     private lateinit var downloader: ModelDownloader
@@ -61,7 +64,7 @@ class MutterAccessibilityService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         downloader = ModelDownloader(this)
-        engine = SttEngine(downloader.modelDir())
+        engine = SttEngine(downloader)
         // Each completed chunk is queued to the single-thread worker, so chunks
         // transcribe and inject strictly in spoken order while capture continues.
         segmenter = VadSegmenter(
@@ -79,31 +82,30 @@ class MutterAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         Log.i(tag, "service connected")
         modelExec.execute {
-            if (downloader.isPresent()) {
-                val ok = engine.load()
-                val vadOk = segmenter.load()
-                Log.i(tag, "model load: $ok, vad load: $vadOk")
+            // Whatever this phone has, not only the preferred model: an update
+            // that changes models must never cost the user dictation while the
+            // replacement downloads.
+            val spec = downloader.resolve()
+            if (spec != null) {
+                Log.i(tag, "model load: ${engine.load()} (${spec.dir}), vad load: ${segmenter.load()}")
             } else {
-                // Silent-until-you-open-the-app was the old behaviour, which is
-                // wrong after an update that changes models: dictation would
-                // just stop with no explanation.
-                Log.w(tag, "model not present — user must run setup")
-                NotificationHelper.notifyError(
-                    this,
-                    getString(R.string.notif_model_missing_title),
-                    getString(R.string.notif_model_missing_text),
-                    NotificationHelper.MODEL_NOTIFICATION_ID,
-                    openSetup = true,
-                )
+                Log.w(tag, "no model on this device — fetching")
             }
         }
+        // Fetches the preferred model if it is missing, announces itself in the
+        // shade, and broadcasts ACTION_MODEL_READY when done. No-op once the
+        // model is in place.
+        ModelBootstrap.ensure(this, downloader)
         registerRecycleReceiver()
         DailyRecycler.arm(this)
         // Open the HAL input now so the first key-down only has to leave
         // standby instead of paying the whole mic open.
         modelExec.execute { recorder.prepare() }
         worker.execute { PendingAudio.prune(this) }
-        modelExec.execute { downloader.pruneOtherModels() }
+        // Self-guarded: does nothing until the preferred model is verified
+        // present. v0.7.0 called the unguarded version here and deleted the
+        // only working model on every install.
+        modelExec.execute { downloader.pruneSupersededModels() }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
@@ -186,11 +188,17 @@ class MutterAccessibilityService : AccessibilityService() {
         // Clipboard snapshot rides the FIFO worker so it lands after the
         // previous hold's finish and before this hold's first chunk.
         worker.execute { injector.begin() }
-        // Foreground FIRST. Android hands a background app zeros instead of an
-        // error (developer.android.com/media/platform/sharing-audio-input), and
-        // an accessibility service with no UI on top counts as background — so
-        // starting the mic before this silently ate the start of every hold.
-        if (!promoteToForeground() || !startRecording()) {
+        // Foreground FIRST, because Android hands a background app zeros rather
+        // than an error (developer.android.com/media/platform/sharing-audio-input)
+        // and an accessibility service with no UI on top counts as background —
+        // starting the mic before this ate the head of every hold.
+        //
+        // But a refused promotion must not cost the user the hold. Through
+        // v0.6.0 this failure was swallowed and dictation still worked; making
+        // it fatal turned one bad phone state into "every press just buzzes".
+        // Record anyway — the capture loop detects real silence and says so.
+        promoteToForeground()
+        if (!startRecording()) {
             demoteForeground()
             capturing.set(false)
             worker.execute { injector.finish(leftover = null) } // undo begin
@@ -350,11 +358,14 @@ class MutterAccessibilityService : AccessibilityService() {
         return null
     }
 
-    // Load-bearing for capture, not just for the shade: without an active
-    // microphone foreground service Android hands this process silence. The
-    // usual cause of failure is a revoked battery-optimisation exemption, and
-    // the symptom would otherwise be dictation that records nothing at all —
-    // so say so instead of logging it.
+    /**
+     * Best effort, never fatal. An active microphone foreground service is what
+     * keeps Android from handing this process silence, so it is attempted
+     * first — but Android can refuse to start one from the background (usually
+     * a lapsed battery-optimisation exemption) and on many devices capture
+     * works regardless. The hold proceeds either way; [notifyMicBlocked] fires
+     * only if the framework confirms it is actually feeding us zeros.
+     */
     private fun promoteToForeground(): Boolean = try {
         startForeground(
             NotificationHelper.NOTIFICATION_ID,
@@ -363,15 +374,16 @@ class MutterAccessibilityService : AccessibilityService() {
         )
         true
     } catch (t: Throwable) {
-        Log.e(tag, "startForeground failed — capture would be silenced", t)
-        NotificationHelper.notifyError(
-            this,
-            getString(R.string.notif_mic_blocked_title),
-            getString(R.string.notif_mic_blocked_text),
-            NotificationHelper.MIC_NOTIFICATION_ID,
-        )
+        Log.e(tag, "startForeground refused — recording anyway", t)
         false
     }
+
+    private fun notifyMicBlocked() = NotificationHelper.notifyError(
+        this,
+        getString(R.string.notif_mic_blocked_title),
+        getString(R.string.notif_mic_blocked_text),
+        NotificationHelper.MIC_NOTIFICATION_ID,
+    )
 
     private fun demoteForeground() {
         try {
@@ -423,7 +435,7 @@ class MutterAccessibilityService : AccessibilityService() {
                 Log.i(tag, "reload skipped — capturing")
                 return@execute
             }
-            if (!downloader.isPresent()) return@execute
+            if (!downloader.hasAnyModel()) return@execute
             engine.release()
             segmenter.release()
             Log.i(tag, "reload: engine=${engine.load()} vad=${segmenter.load()}")

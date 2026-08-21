@@ -120,6 +120,19 @@ cd android/
 # On-device tests need the model present; it is ~620 MB so it is not fetched per run.
 ./scripts/push-model.sh               # cache + adb push the model into the app's filesDir
 ./gradlew :app:connectedDebugAndroidTest
+
+An emulator works, but give it real memory — the model peaks near 820 MB, and
+the default AVD has 2 GB:
+
+```
+avdmanager create avd -n mutter_test -k "system-images;android-35;google_apis;arm64-v8a"
+# set hw.ramSize=6144 in ~/.android/avd/mutter_test.avd/config.ini
+emulator -avd mutter_test -no-window -gpu swiftshader_indirect
+```
+
+Note the volume-down path itself cannot be tested this way: injected key events
+(`adb shell input keyevent`) bypass accessibility key filtering. On a real phone
+`adb logcat -s MutterAudio` prints the head latency of each hold.
 ```
 
 The sherpa-onnx Android AAR (~55 MB) is **not** committed to the repo. The first `./gradlew assembleDebug` runs `scripts/fetch-libs.sh` automatically, which downloads it from `k2-fsa/sherpa-onnx` releases into `app/libs/` and SHA-256-verifies. Idempotent — subsequent builds skip the download.

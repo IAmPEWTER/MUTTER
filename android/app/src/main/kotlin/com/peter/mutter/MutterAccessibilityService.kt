@@ -376,11 +376,16 @@ class MutterAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Debug builds only. Drives a real hold from adb, inside this process, so
-     * capture can be observed under the background conditions production runs
-     * in — an instrumentation process is foreground and never reproduces them.
+     * Drives a real hold from adb, inside this process, so capture can be
+     * observed under the background conditions production runs in — an
+     * instrumentation process is foreground and never reproduces them.
      *
      *   adb shell am broadcast -a com.peter.mutter.DEBUG_HOLD --es op down
+     *
+     * Releases ship the debug APK, so BuildConfig.DEBUG is true on real
+     * phones: this receiver has to be exported to hear adb, and exported plus
+     * unguarded would let any installed app start a recording. Sending it
+     * therefore requires DUMP, which shell holds and no ordinary app can.
      */
     private fun registerDebugHoldReceiver() {
         if (debugReceiver != null) return
@@ -396,6 +401,8 @@ class MutterAccessibilityService : AccessibilityService() {
             this,
             receiver,
             IntentFilter("com.peter.mutter.DEBUG_HOLD"),
+            android.Manifest.permission.DUMP,
+            null,
             ContextCompat.RECEIVER_EXPORTED,
         )
         debugReceiver = receiver

@@ -53,7 +53,6 @@ class MutterAccessibilityService : AccessibilityService() {
 
     @Volatile private var hold: Hold? = null
     private var recycleReceiver: BroadcastReceiver? = null
-    private var debugReceiver: BroadcastReceiver? = null
 
     companion object {
         /** Sent by SetupActivity when a model download completes. In-package only. */
@@ -104,7 +103,6 @@ class MutterAccessibilityService : AccessibilityService() {
         // model is in place.
         ModelBootstrap.ensure(this, downloader)
         registerRecycleReceiver()
-        if (BuildConfig.DEBUG) registerDebugHoldReceiver()
         DailyRecycler.arm(this)
         // Open the HAL input now so the first key-down only has to leave
         // standby instead of paying the whole mic open.
@@ -128,8 +126,6 @@ class MutterAccessibilityService : AccessibilityService() {
         recorder.release()
         recycleReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) {} }
         recycleReceiver = null
-        debugReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) {} }
-        debugReceiver = null
         DailyRecycler.disarm(this)
         segmenter.release()
         engine.release()
@@ -181,25 +177,15 @@ class MutterAccessibilityService : AccessibilityService() {
             Log.d(tag, "handleDown drop: no editable + ime down")
             return false
         }
-        Log.i(tag, "handleDown accept: editable=${editable != null} imeUp=$imeUp")
-        return startHold(editable)
-    }
-
-    /**
-     * A hold, once the gates have passed. Split from the gates so the real
-     * path can be driven inside the real service process: an accessibility
-     * service captures as a background app, an instrumentation process does
-     * not, and that difference is exactly what this path turns on.
-     */
-    private fun startHold(target: AccessibilityNodeInfo?): Boolean {
         if (!capturing.compareAndSet(false, true)) return true // swallow stray double-down
         // Off the input thread on purpose — loading the VAD here would put its
         // startup back on the very path this hold is trying to keep short. The
         // hold runs degraded; the next one has it.
         if (!segmenter.isLoaded()) modelExec.execute { segmenter.load() }
+        Log.i(tag, "handleDown accept: editable=${editable != null} imeUp=$imeUp")
 
         // may be null; transcribeAndInject falls back via findPasteTarget
-        hold = Hold(target)
+        hold = Hold(editable)
         segmenter.reset()
         // Clipboard snapshot rides the FIFO worker so it lands after the
         // previous hold's finish and before this hold's first chunk.
@@ -373,39 +359,6 @@ class MutterAccessibilityService : AccessibilityService() {
         val h = hold
         worker.execute { endHold(h) } // FIFO: after any already-queued chunks
         demoteForeground()
-    }
-
-    /**
-     * Drives a real hold from adb, inside this process, so capture can be
-     * observed under the background conditions production runs in — an
-     * instrumentation process is foreground and never reproduces them.
-     *
-     *   adb shell am broadcast -a com.peter.mutter.DEBUG_HOLD --es op down
-     *
-     * Releases ship the debug APK, so BuildConfig.DEBUG is true on real
-     * phones: this receiver has to be exported to hear adb, and exported plus
-     * unguarded would let any installed app start a recording. Sending it
-     * therefore requires DUMP, which shell holds and no ordinary app can.
-     */
-    private fun registerDebugHoldReceiver() {
-        if (debugReceiver != null) return
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context?, intent: Intent?) {
-                when (intent?.getStringExtra("op")) {
-                    "down" -> Log.i(tag, "DEBUG hold down -> ${startHold(null)}")
-                    "up" -> Log.i(tag, "DEBUG hold up -> ${handleUp()}")
-                }
-            }
-        }
-        ContextCompat.registerReceiver(
-            this,
-            receiver,
-            IntentFilter("com.peter.mutter.DEBUG_HOLD"),
-            android.Manifest.permission.DUMP,
-            null,
-            ContextCompat.RECEIVER_EXPORTED,
-        )
-        debugReceiver = receiver
     }
 
     private fun registerRecycleReceiver() {

@@ -90,7 +90,10 @@ object SttModel {
         ),
     )
 
-    /** What shipped through v0.6.0 — the last build known to dictate. */
+    /**
+     * What shipped through v0.6.0. Kept loadable so an install that still has
+     * these files dictates with them instead of waiting on a download.
+     */
     val DISTIL_SMALL_EN = Spec(
         dir = "distil-small.en",
         family = Family.WHISPER,
@@ -106,19 +109,11 @@ object SttModel {
         ),
     )
 
-    /**
-     * What a fresh install fetches.
-     *
-     * Back to v0.6.0's model. Parakeet is the more accurate engine and stays
-     * loadable, but it was swapped in during the same session that broke
-     * dictation, and it is the larger variable: 620 MB to fetch against 291 MB,
-     * and ~740 MB resident against ~660 MB. Until a phone that failed is seen
-     * to dictate again, the model is the known-good one.
-     */
-    val PREFERRED = DISTIL_SMALL_EN
+    /** What a fresh install fetches. */
+    val PREFERRED = PARAKEET
 
     /** Preferred first — [ModelDownloader.resolve] loads the first one present. */
-    val KNOWN = listOf(DISTIL_SMALL_EN, PARAKEET)
+    val KNOWN = listOf(PARAKEET, DISTIL_SMALL_EN)
 
     /** The preferred model's assets. Kept for call sites that only ever fetch. */
     val ASSETS = PREFERRED.assets

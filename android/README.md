@@ -2,7 +2,7 @@
 
 Hold **volume-down** inside any text field on Android → speak → release → text appears at the cursor.
 
-Local speech recognition (sherpa-onnx, whisper distil-small.en INT8). CPU only. Clipboard restored within ~200 ms.
+Local speech recognition (sherpa-onnx, NVIDIA parakeet-tdt-0.6b-v2 INT8). CPU only. Clipboard restored within ~200 ms.
 
 ## Get the APK
 
@@ -53,7 +53,7 @@ First-time setup: Settings → tap Check for updates → Install. Android will o
    - Enable accessibility service (Settings → Accessibility → Installed apps → MUTTER → on).
      - You will be asked to confirm key-event filtering. Allow.
    - Allow battery optimization exemption (prevents Android from killing the service).
-   - The speech model (~291 MB, one time) downloads itself on Wi-Fi — the wizard
+   - The speech model (~620 MB, one time) downloads itself on Wi-Fi — the wizard
      shows progress, and the app fetches it in the background either way.
    - In-wizard test field: hold volume-down and say something. Release.
 
@@ -69,17 +69,21 @@ When MUTTER is recording, a low-priority notification shows in the shade and the
 
 To disable temporarily: open MUTTER → Settings → toggle *Volume-down intercept* off. Re-enable from the same place.
 
+If a hold only buzzes, MUTTER → Settings → **Recent activity** says why in plain words (mic refused, Android muted it, model would not load, app rejected the text).
+
 ## What's where
 
 ```
 android/
 ├── app/
-│   ├── build.gradle.kts          — AGP 8.7, Kotlin 2.0, compileSdk 35
+│   ├── build.gradle.kts          — AGP 8.13, Kotlin 2.2, compileSdk 36
 │   ├── libs/sherpa-onnx-1.13.6.aar
 │   └── src/main/
 │       ├── AndroidManifest.xml
 │       ├── kotlin/com/peter/mutter/
 │       │   ├── MutterAccessibilityService.kt   — key intercept, hold sessions, FG promotion
+│       │   ├── FocusTargets.kt                 — focused/editable/paste-target lookups
+│       │   ├── Diagnostics.kt                  — last 60 plain-language events, shown in Settings
 │       │   ├── AudioRecorder.kt                — 16 kHz mono PCM capture
 │       │   ├── VadSegmenter.kt                 — Silero VAD + chunk buffering
 │       │   ├── AdaptiveEndpointer.kt           — pure chunk-cut logic
@@ -120,11 +124,11 @@ cd android/
 ./gradlew :app:testDebugUnitTest      # JVM unit tests for the pure-logic units
 ./gradlew :app:lintDebug              # static analysis (warnings only)
 
-# On-device tests need the model present; it is ~291 MB so it is not fetched per run.
+# On-device tests need the model present; it is ~620 MB so it is not fetched per run.
 ./scripts/push-model.sh               # cache + adb push the model into the app's filesDir
 ./gradlew :app:connectedDebugAndroidTest
 
-An emulator works, but give it real memory — the service peaks near 470 MB, and
+An emulator works, but give it real memory — the model peaks near 820 MB, and
 the default AVD has 2 GB:
 
 ```
@@ -146,11 +150,6 @@ Debug build is signed automatically with `~/.android/debug.keystore`. Sideloadab
 
 - 45 JVM unit tests (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater, pending-audio pruning, model-lifecycle policy).
 - 9 instrumented tests on an arm64 Android 15 device: the model loads and decodes through sherpa-onnx's JNI, the real download verifies every asset, a superseded model survives until its replacement lands, the VAD path follows the model in use, and the capture path delivers windows and survives reuse across holds.
-- The hold path itself, driven inside the real accessibility-service process (debug builds):
-  `adb shell am broadcast -a com.peter.mutter.DEBUG_HOLD --es op down` / `--es op up`.
-  Needed because `adb shell input keyevent` never reaches `onKeyEvent` — accessibility key
-  filtering only sees real hardware input — and because a service captures as a background
-  app while an instrumentation process does not. Results land in Settings > Recent activity.
 - v0.7.0 → v0.8.0 upgrade on-device: v0.7.0 deleted the installed model on connect; v0.8.0 kept it, fetched the replacement unattended in 69 s, and reloaded engine + VAD without a restart.
 - Daily driver on Galaxy S23 (One UI): vol-down intercept, paste injection, streaming chunks.
 

@@ -9,12 +9,10 @@ import android.content.pm.ServiceInfo
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
-import android.text.InputType
 import android.util.Log
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.view.accessibility.AccessibilityWindowInfo
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -55,6 +53,7 @@ class MutterAccessibilityService : AccessibilityService() {
 
     @Volatile private var hold: Hold? = null
     private var recycleReceiver: BroadcastReceiver? = null
+    private var debugReceiver: BroadcastReceiver? = null
 
     companion object {
         /** Sent by SetupActivity when a model download completes. In-package only. */
@@ -87,9 +86,17 @@ class MutterAccessibilityService : AccessibilityService() {
             // replacement downloads.
             val spec = downloader.resolve()
             if (spec != null) {
-                Log.i(tag, "model load: ${engine.load()} (${spec.dir}), vad load: ${segmenter.load()}")
+                val ok = engine.load()
+                val vadOk = segmenter.load()
+                Log.i(tag, "model load: $ok (${spec.dir}), vad load: $vadOk")
+                Diagnostics.record(
+                    this,
+                    if (ok) "ready — speech model ${spec.dir}${if (vadOk) "" else " (no voice detector)"}"
+                    else "PROBLEM: speech model ${spec.dir} is present but failed to load",
+                )
             } else {
                 Log.w(tag, "no model on this device — fetching")
+                Diagnostics.record(this, "PROBLEM: no speech model on this phone — downloading it")
             }
         }
         // Fetches the preferred model if it is missing, announces itself in the
@@ -97,6 +104,7 @@ class MutterAccessibilityService : AccessibilityService() {
         // model is in place.
         ModelBootstrap.ensure(this, downloader)
         registerRecycleReceiver()
+        if (BuildConfig.DEBUG) registerDebugHoldReceiver()
         DailyRecycler.arm(this)
         // Open the HAL input now so the first key-down only has to leave
         // standby instead of paying the whole mic open.
@@ -120,6 +128,8 @@ class MutterAccessibilityService : AccessibilityService() {
         recorder.release()
         recycleReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) {} }
         recycleReceiver = null
+        debugReceiver?.let { try { unregisterReceiver(it) } catch (_: Throwable) {} }
+        debugReceiver = null
         DailyRecycler.disarm(this)
         segmenter.release()
         engine.release()
@@ -156,18 +166,14 @@ class MutterAccessibilityService : AccessibilityService() {
     private fun handleDown(): Boolean {
         // Password guard runs first: never record while a password field
         // has focus, regardless of keyboard visibility.
-        val focused = try {
-            findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        } catch (t: Throwable) {
-            Log.d(tag, "findFocus failed", t); null
-        }
-        if (focused != null && isPasswordField(focused)) {
+        val focused = FocusTargets.focused(this)
+        if (focused != null && FocusTargets.isPasswordField(focused)) {
             Log.i(tag, "handleDown drop: password field focused")
             return false
         }
 
         val editable = focused?.takeIf { it.isEditable }
-        val imeUp = isImeUp()
+        val imeUp = FocusTargets.isImeUp(this)
         // IME-up gate covers editors (Samsung Notes, rich-text canvases)
         // whose surface doesn't expose isEditable via AX but still raise
         // the soft keyboard.
@@ -175,15 +181,25 @@ class MutterAccessibilityService : AccessibilityService() {
             Log.d(tag, "handleDown drop: no editable + ime down")
             return false
         }
+        Log.i(tag, "handleDown accept: editable=${editable != null} imeUp=$imeUp")
+        return startHold(editable)
+    }
+
+    /**
+     * A hold, once the gates have passed. Split from the gates so the real
+     * path can be driven inside the real service process: an accessibility
+     * service captures as a background app, an instrumentation process does
+     * not, and that difference is exactly what this path turns on.
+     */
+    private fun startHold(target: AccessibilityNodeInfo?): Boolean {
         if (!capturing.compareAndSet(false, true)) return true // swallow stray double-down
         // Off the input thread on purpose — loading the VAD here would put its
         // startup back on the very path this hold is trying to keep short. The
         // hold runs degraded; the next one has it.
         if (!segmenter.isLoaded()) modelExec.execute { segmenter.load() }
-        Log.i(tag, "handleDown accept: editable=${editable != null} imeUp=$imeUp")
 
         // may be null; transcribeAndInject falls back via findPasteTarget
-        hold = Hold(editable)
+        hold = Hold(target)
         segmenter.reset()
         // Clipboard snapshot rides the FIFO worker so it lands after the
         // previous hold's finish and before this hold's first chunk.
@@ -202,6 +218,7 @@ class MutterAccessibilityService : AccessibilityService() {
             demoteForeground()
             capturing.set(false)
             worker.execute { injector.finish(leftover = null) } // undo begin
+            Diagnostics.record(this, "PROBLEM: hold refused — the microphone would not start")
             haptic(50)
             return false
         }
@@ -228,6 +245,12 @@ class MutterAccessibilityService : AccessibilityService() {
     // are surfaced via notification — a dictation is never silently lost.
     private fun endHold(h: Hold?) {
         val leftover = h?.failedTexts?.takeIf { it.isNotEmpty() }?.joinToString(" ")
+        // Recorded because it is the one outcome with no other trace: the hold
+        // ran, the mic was open, and nothing came back. That separates a muted
+        // microphone from a model that failed.
+        if (leftover == null && h?.injectedAny != true) {
+            Diagnostics.record(this, "hold ended — no speech heard")
+        }
         injector.finish(leftover)
         if (leftover != null) {
             NotificationHelper.notifyError(
@@ -247,6 +270,7 @@ class MutterAccessibilityService : AccessibilityService() {
     private fun transcribeAndInject(h: Hold?, samples: FloatArray) {
         if (!engine.isLoaded() && !engine.load()) {
             Log.e(tag, "engine load failed at transcribe time")
+            Diagnostics.record(this, "PROBLEM: heard you, but the speech model would not load")
             persistChunk(samples)
             haptic(100)
             return
@@ -254,6 +278,7 @@ class MutterAccessibilityService : AccessibilityService() {
         val raw = engine.transcribe(samples, 16000)
         if (raw == null) {
             // Engine failure — the audio must not be lost.
+            Diagnostics.record(this, "PROBLEM: heard you, but transcription failed — audio saved")
             persistChunk(samples)
             haptic(100)
             return
@@ -268,11 +293,13 @@ class MutterAccessibilityService : AccessibilityService() {
         val clean = Sanitizer.collapseRepeats(Sanitizer.sanitize(raw))
         if (clean.isEmpty()) return
         val text = if (h?.injectedAny == true) " $clean" else clean
-        val node = findFocusedEditable() ?: refreshedTarget(h) ?: findPasteTarget()
+        val node = FocusTargets.focusedEditable(this) ?: refreshedTarget(h) ?: FocusTargets.pasteTarget(this)
         if (injector.inject(node, text)) {
             h?.injectedAny = true
+            Diagnostics.record(this, "typed ${clean.length} characters")
         } else {
             Log.w(tag, "injection failed — preserving transcript for end of hold")
+            Diagnostics.record(this, "PROBLEM: could not type into this app — text copied to clipboard")
             h?.failedTexts?.add(clean)
             haptic(80)
         }
@@ -301,63 +328,6 @@ class MutterAccessibilityService : AccessibilityService() {
         return node
     }
 
-    private fun findFocusedEditable(): AccessibilityNodeInfo? {
-        val node = try {
-            findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        } catch (t: Throwable) {
-            Log.d(tag, "findFocus failed", t)
-            null
-        } ?: return null
-        if (!node.isEditable) return null
-        if (isPasswordField(node)) return null
-        return node
-    }
-
-    private fun isPasswordField(node: AccessibilityNodeInfo): Boolean {
-        val variation = node.inputType and InputType.TYPE_MASK_VARIATION
-        return variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
-                variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD ||
-                variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
-                variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
-    }
-
-    private fun isImeUp(): Boolean = try {
-        windows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
-    } catch (t: Throwable) {
-        Log.d(tag, "windows lookup failed", t)
-        false
-    }
-
-    // Fallback target lookup for apps whose editor doesn't surface as
-    // isEditable in the AX tree (Samsung Notes, custom rich-text canvases).
-    // Walks active window roots and picks the first node whose action list
-    // contains ACTION_PASTE.
-    private fun findPasteTarget(): AccessibilityNodeInfo? {
-        val roots = try {
-            windows.mapNotNull { it.root }
-        } catch (t: Throwable) {
-            Log.d(tag, "windows.root failed", t)
-            return null
-        }
-        for (root in roots) {
-            val hit = findNodeWithPasteAction(root)
-            if (hit != null) return hit
-        }
-        return null
-    }
-
-    private fun findNodeWithPasteAction(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
-        if (node.actionList.any { it.id == AccessibilityNodeInfo.AccessibilityAction.ACTION_PASTE.id }) {
-            return node
-        }
-        for (i in 0 until node.childCount) {
-            val child = node.getChild(i) ?: continue
-            val hit = findNodeWithPasteAction(child)
-            if (hit != null) return hit
-        }
-        return null
-    }
-
     /**
      * Best effort, never fatal. An active microphone foreground service is what
      * keeps Android from handing this process silence, so it is attempted
@@ -378,12 +348,15 @@ class MutterAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun notifyMicBlocked() = NotificationHelper.notifyError(
-        this,
-        getString(R.string.notif_mic_blocked_title),
-        getString(R.string.notif_mic_blocked_text),
-        NotificationHelper.MIC_NOTIFICATION_ID,
-    )
+    private fun notifyMicBlocked() {
+        Diagnostics.record(this, "PROBLEM: Android muted the microphone — nothing was recorded")
+        NotificationHelper.notifyError(
+            this,
+            getString(R.string.notif_mic_blocked_title),
+            getString(R.string.notif_mic_blocked_text),
+            NotificationHelper.MIC_NOTIFICATION_ID,
+        )
+    }
 
     private fun demoteForeground() {
         try {
@@ -400,6 +373,32 @@ class MutterAccessibilityService : AccessibilityService() {
         val h = hold
         worker.execute { endHold(h) } // FIFO: after any already-queued chunks
         demoteForeground()
+    }
+
+    /**
+     * Debug builds only. Drives a real hold from adb, inside this process, so
+     * capture can be observed under the background conditions production runs
+     * in — an instrumentation process is foreground and never reproduces them.
+     *
+     *   adb shell am broadcast -a com.peter.mutter.DEBUG_HOLD --es op down
+     */
+    private fun registerDebugHoldReceiver() {
+        if (debugReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.getStringExtra("op")) {
+                    "down" -> Log.i(tag, "DEBUG hold down -> ${startHold(null)}")
+                    "up" -> Log.i(tag, "DEBUG hold up -> ${handleUp()}")
+                }
+            }
+        }
+        ContextCompat.registerReceiver(
+            this,
+            receiver,
+            IntentFilter("com.peter.mutter.DEBUG_HOLD"),
+            ContextCompat.RECEIVER_EXPORTED,
+        )
+        debugReceiver = receiver
     }
 
     private fun registerRecycleReceiver() {
@@ -438,7 +437,14 @@ class MutterAccessibilityService : AccessibilityService() {
             if (!downloader.hasAnyModel()) return@execute
             engine.release()
             segmenter.release()
-            Log.i(tag, "reload: engine=${engine.load()} vad=${segmenter.load()}")
+            val ok = engine.load()
+            val vadOk = segmenter.load()
+            Log.i(tag, "reload: engine=$ok vad=$vadOk")
+            Diagnostics.record(
+                this,
+                if (ok) "ready — speech model ${downloader.resolve()?.dir ?: "?"}"
+                else "PROBLEM: speech model failed to load",
+            )
         }
     }
 

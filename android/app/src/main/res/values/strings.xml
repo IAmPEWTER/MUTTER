@@ -67,4 +67,6 @@
     <string name="updater_install">Install update</string>
     <string name="updater_needs_perm">Allow "install unknown apps" for MUTTER, then tap Install again.</string>
     <string name="updater_error">Update check failed: %1$s</string>
+    <string name="settings_activity">Recent activity</string>
+    <string name="settings_activity_empty">Nothing recorded yet. Hold volume-down and speak, then come back here.</string>
 </resources>

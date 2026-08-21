@@ -10,6 +10,7 @@ import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.peter.mutter.BuildConfig
+import com.peter.mutter.Diagnostics
 import com.peter.mutter.Prefs
 import com.peter.mutter.R
 import com.peter.mutter.updater.UpdateChecker
@@ -40,10 +41,25 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.about_text).text =
             getString(R.string.settings_about_desc, BuildConfig.VERSION_NAME)
 
+        showDiagnostics()
+
         updaterStatus = findViewById(R.id.updater_status)
         btnCheckUpdates = findViewById(R.id.btn_check_updates)
         updaterStatus.text = getString(R.string.updater_idle)
         btnCheckUpdates.setOnClickListener { onUpdaterButtonClicked() }
+    }
+
+    // Re-read on every resume: the failure being diagnosed happens in the
+    // accessibility service, in another process, while this screen is closed.
+    override fun onResume() {
+        super.onResume()
+        showDiagnostics()
+    }
+
+    private fun showDiagnostics() {
+        val log = Diagnostics.read(this)
+        findViewById<TextView>(R.id.diagnostics_text).text =
+            log.ifBlank { getString(R.string.settings_activity_empty) }
     }
 
     private fun onUpdaterButtonClicked() {

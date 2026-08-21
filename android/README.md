@@ -84,7 +84,7 @@ android/
 │       │   ├── VadSegmenter.kt                 — Silero VAD + chunk buffering
 │       │   ├── AdaptiveEndpointer.kt           — pure chunk-cut logic
 │       │   ├── SttModel.kt                     — known models, files, sizes, hashes
-│       │   ├── ModelPolicy.kt                   — pure: what may be pruned, which model loads
+│       │   ├── ModelPolicy.kt                   — pure: what may be pruned, and when
 │       │   ├── ModelBootstrap.kt                — unattended model fetch on Wi-Fi
 │       │   ├── SttEngine.kt                    — sherpa-onnx OfflineRecognizer wrapper
 │       │   ├── Sanitizer.kt                    — text cleanup + repeat-loop collapse
@@ -144,8 +144,8 @@ Debug build is signed automatically with `~/.android/debug.keystore`. Sideloadab
 
 ## Verified
 
-- 47 JVM unit tests (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater, pending-audio pruning, model-lifecycle policy).
-- 7 instrumented tests on an arm64 Android 15 device: the model loads and decodes through sherpa-onnx's JNI, the real download verifies every asset, a superseded model survives until its replacement lands, and the capture path delivers windows and survives reuse across holds.
+- 45 JVM unit tests (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater, pending-audio pruning, model-lifecycle policy).
+- 9 instrumented tests on an arm64 Android 15 device: the model loads and decodes through sherpa-onnx's JNI, the real download verifies every asset, a superseded model survives until its replacement lands, the VAD path follows the model in use, and the capture path delivers windows and survives reuse across holds.
 - v0.7.0 → v0.8.0 upgrade on-device: v0.7.0 deleted the installed model on connect; v0.8.0 kept it, fetched the replacement unattended in 69 s, and reloaded engine + VAD without a restart.
 - Daily driver on Galaxy S23 (One UI): vol-down intercept, paste injection, streaming chunks.
 

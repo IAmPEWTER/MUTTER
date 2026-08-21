@@ -31,6 +31,8 @@ import kotlin.concurrent.thread
 class AudioRecorder(
     private val sampleRate: Int = 16_000,
     private val windowSize: Int = 512,
+    /** Fired once per hold if the framework confirms it is feeding us zeros. */
+    private val onSilenced: () -> Unit = {},
 ) {
     private val tag = "MutterAudio"
     private val running = AtomicBoolean(false)
@@ -87,10 +89,27 @@ class AudioRecorder(
         return false
     }
 
-    /** Begin capture. The caller must already be in a foreground state. */
+    /**
+     * Begin capture. The caller should already be in a foreground state, but a
+     * hold is attempted either way — being silenced is recoverable, refusing to
+     * record is not.
+     */
     @Synchronized
     fun start(onWindow: (FloatArray) -> Unit): Boolean {
         if (running.get()) return false
+        // Two attempts. The track is held open between holds so key-down only
+        // has to leave standby, and the framework can invalidate it while idle
+        // — a phone call, another app taking the input. That only surfaces
+        // here, so a failed attempt drops the track and the next one builds a
+        // fresh AudioRecord rather than costing the user the hold.
+        repeat(2) { attempt ->
+            if (attemptStart(onWindow)) return true
+            Log.w(tag, "start attempt ${attempt + 1} failed")
+        }
+        return false
+    }
+
+    private fun attemptStart(onWindow: (FloatArray) -> Unit): Boolean {
         if (!prepare()) return false
         val rec = record ?: return false
         val t0 = SystemClock.elapsedRealtime()
@@ -152,6 +171,9 @@ class AudioRecorder(
                         }
                         if (silenced == true) {
                             Log.e(tag, "head: SILENCED by the framework — not in a foreground state")
+                            try { onSilenced() } catch (t: Throwable) {
+                                Log.d(tag, "onSilenced handler threw", t)
+                            }
                         }
                     }
                 }

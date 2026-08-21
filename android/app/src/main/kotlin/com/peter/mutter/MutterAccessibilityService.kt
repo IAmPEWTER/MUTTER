@@ -87,6 +87,7 @@ class MutterAccessibilityService : AccessibilityService() {
         // Open the HAL input now so the first key-down only has to leave
         // standby instead of paying the whole mic open.
         modelExec.execute { recorder.prepare() }
+        worker.execute { PendingAudio.prune(this) }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {

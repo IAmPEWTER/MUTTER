@@ -12,6 +12,11 @@ import java.nio.ByteOrder
  * native error), the chunk is written here as a 16 kHz mono WAV so the
  * dictation is recoverable instead of silently lost. Files land in
  * filesDir/pending/ and the user is told via notification.
+ *
+ * Nothing ever deleted these. A failure that repeats — a corrupt model, a
+ * device that keeps refusing the mic — writes a WAV per chunk forever, so the
+ * directory is bounded by [prune] on every save: newest [KEEP_FILES] kept,
+ * anything past [MAX_AGE_MS] dropped regardless.
  */
 object PendingAudio {
 
@@ -29,11 +34,38 @@ object PendingAudio {
             out.write(pcm.array())
         }
         Log.i(TAG, "saved ${file.name} (${samples.size / sampleRate}s)")
+        prune(dir, System.currentTimeMillis())
         file
     } catch (t: Throwable) {
         Log.e(TAG, "failed to persist audio", t)
         null
     }
+
+    /** Bound the directory. Public for [MutterAccessibilityService] at startup. */
+    fun prune(context: Context) = prune(File(context.filesDir, "pending"), System.currentTimeMillis())
+
+    private fun prune(dir: File, nowMillis: Long) {
+        val files = dir.listFiles()?.filter { it.isFile && it.name.endsWith(".wav") } ?: return
+        for (f in selectForDeletion(files, nowMillis)) {
+            if (!f.delete()) Log.w(TAG, "could not delete ${f.name}")
+        }
+    }
+
+    /** Pure so it is unit-testable: which of [files] should go. */
+    fun selectForDeletion(
+        files: List<File>,
+        nowMillis: Long,
+        keep: Int = KEEP_FILES,
+        maxAgeMs: Long = MAX_AGE_MS,
+    ): List<File> {
+        val newestFirst = files.sortedByDescending { it.lastModified() }
+        return newestFirst.filterIndexed { i, f ->
+            i >= keep || nowMillis - f.lastModified() > maxAgeMs
+        }
+    }
+
+    private const val KEEP_FILES = 20
+    private const val MAX_AGE_MS = 14L * 24 * 60 * 60 * 1000
 
     private fun wavHeader(dataLen: Int, sampleRate: Int): ByteArray {
         val h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)

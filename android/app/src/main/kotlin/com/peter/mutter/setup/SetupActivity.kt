@@ -74,15 +74,17 @@ class SetupActivity : AppCompatActivity() {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
         kickOffSilentUpdateCheck(btnSettings)
+        // Ask up front rather than as a rider on the mic button: if mic was
+        // already granted that button is disabled, and the service reports a
+        // blocked microphone or a missing model through notifications.
+        if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
         btnMic.setOnClickListener {
             requestMic.launch(Manifest.permission.RECORD_AUDIO)
-            // Also request POST_NOTIFICATIONS (Android 13+) so the FG notif shows.
-            if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                != PackageManager.PERMISSION_GRANTED
-            ) {
-                requestNotif.launch(Manifest.permission.POST_NOTIFICATIONS)
-            }
         }
 
         findViewById<Button>(R.id.btn_restricted).setOnClickListener {
@@ -150,7 +152,12 @@ class SetupActivity : AppCompatActivity() {
         label.text = if (ok) "✓ done" else "✗ pending"
         label.setTextColor(getColor(if (ok) R.color.text_muted else R.color.text))
         button.isEnabled = !ok
-        button.text = if (ok) getString(R.string.action_done) else button.text
+        // Stash the original label the first time through. Reading button.text
+        // for the not-ok case meant that once a step went green its button was
+        // stuck reading DONE, so a permission revoked later showed "✗ pending"
+        // next to a button that claimed it was already handled.
+        val original = button.tag as? CharSequence ?: button.text.also { button.tag = it }
+        button.text = if (ok) getString(R.string.action_done) else original
     }
 
     private fun isAccessibilityEnabled(): Boolean {

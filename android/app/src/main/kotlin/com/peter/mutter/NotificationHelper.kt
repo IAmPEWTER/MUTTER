@@ -3,7 +3,9 @@ package com.peter.mutter
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.util.Log
 
 object NotificationHelper {
@@ -13,6 +15,7 @@ object NotificationHelper {
     const val ERROR_CHANNEL_ID = "mutter_errors"
     const val ERROR_NOTIFICATION_ID = 1002
     const val MIC_NOTIFICATION_ID = 1003
+    const val MODEL_NOTIFICATION_ID = 1004
 
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -56,6 +59,7 @@ object NotificationHelper {
         title: String,
         text: String,
         id: Int = ERROR_NOTIFICATION_ID,
+        openSetup: Boolean = false,
     ) {
         try {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -65,10 +69,20 @@ object NotificationHelper {
                 .setStyle(Notification.BigTextStyle().bigText(text))
                 .setSmallIcon(R.drawable.ic_mic)
                 .setAutoCancel(true)
+                .apply { if (openSetup) setContentIntent(setupIntent(context)) }
                 .build()
             nm.notify(id, n)
         } catch (t: Throwable) {
             Log.e("MutterNotif", "notifyError failed", t)
         }
+    }
+
+    private fun setupIntent(context: Context): PendingIntent {
+        val intent = Intent()
+            .setClassName(context, "com.peter.mutter.setup.SetupActivity")
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        return PendingIntent.getActivity(
+            context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
     }
 }

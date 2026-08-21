@@ -79,7 +79,17 @@ class MutterAccessibilityService : AccessibilityService() {
                 val vadOk = segmenter.load()
                 Log.i(tag, "model load: $ok, vad load: $vadOk")
             } else {
+                // Silent-until-you-open-the-app was the old behaviour, which is
+                // wrong after an update that changes models: dictation would
+                // just stop with no explanation.
                 Log.w(tag, "model not present — user must run setup")
+                NotificationHelper.notifyError(
+                    this,
+                    getString(R.string.notif_model_missing_title),
+                    getString(R.string.notif_model_missing_text),
+                    NotificationHelper.MODEL_NOTIFICATION_ID,
+                    openSetup = true,
+                )
             }
         }
         registerRecycleReceiver()

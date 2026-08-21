@@ -31,7 +31,7 @@
     <string name="setup_step_battery">4. Battery optimization exemption</string>
     <string name="setup_step_battery_desc">Prevents Android from killing the service in the background.</string>
     <string name="setup_step_model">5. Download speech model</string>
-    <string name="setup_step_model_desc">~300 MB. One-time download. Cached on device.</string>
+    <string name="setup_step_model_desc">~620 MB. One-time download, cached on device. Use Wi-Fi.</string>
     <string name="setup_step_test">6. Test it</string>
     <string name="setup_step_test_desc">Hold volume-down here and say something. Release to transcribe.</string>
 
@@ -50,7 +50,7 @@
     <string name="settings_intercept_enabled">Volume-down intercept</string>
     <string name="settings_intercept_enabled_desc">When off, volume-down behaves normally everywhere.</string>
     <string name="settings_about">About</string>
-    <string name="settings_about_desc">MUTTER %1$s · model: distil-small.en INT8 · CPU only</string>
+    <string name="settings_about_desc">MUTTER %1$s · model: parakeet-tdt-0.6b-v2 INT8 · CPU only</string>
 
     <string name="settings_updates">Updates</string>
     <string name="settings_updates_desc">Checks GitHub Releases for a newer build.</string>

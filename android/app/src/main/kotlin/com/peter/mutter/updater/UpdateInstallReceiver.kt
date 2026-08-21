@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.util.Log
+import java.io.File
 
 class UpdateInstallReceiver : BroadcastReceiver() {
 
@@ -24,7 +25,12 @@ class UpdateInstallReceiver : BroadcastReceiver() {
                 context.startActivity(confirm)
                 Log.i(tag, "launched system installer for v$vc")
             }
-            PackageInstaller.STATUS_SUCCESS -> Log.i(tag, "install succeeded for v$vc")
+            PackageInstaller.STATUS_SUCCESS -> {
+                Log.i(tag, "install succeeded for v$vc")
+                // The staged APK is ~44 MB and was only cleared by the *next*
+                // update, so it sat in the cache until then.
+                File(context.cacheDir, "updater").listFiles()?.forEach { it.delete() }
+            }
             else -> {
                 val msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
                 Log.w(tag, "install status=$status msg=$msg vc=$vc")

@@ -1,6 +1,7 @@
 package com.peter.mutter
 
 import android.content.Context
+import android.os.storage.StorageManager
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -62,12 +63,29 @@ class ModelDownloader(private val context: Context) {
         onProgress: (downloaded: Long, total: Long, file: String) -> Unit,
     ): Result<Unit> = withContext(Dispatchers.IO) {
         val dir = modelDir()
+        // Up front, not at the end: an app update that changes models leaves
+        // the previous weights sitting there, and freeing them is what makes
+        // room for these. They are already unreadable — nothing loads from a
+        // directory that is not SttModel.DIR.
+        pruneOtherModels()
         val total = SttModel.TOTAL_BYTES
+        val needed = SttModel.ASSETS.filterNot { File(dir, it.filename).length() == it.size }
+            .sumOf { it.size }
+        val free = allocatableBytes(dir)
+        if (free < needed + HEADROOM_BYTES) {
+            return@withContext Result.failure(
+                RuntimeException(
+                    "needs ${(needed + HEADROOM_BYTES) / 1_000_000} MB free, " +
+                        "phone has ${free / 1_000_000} MB"
+                )
+            )
+        }
         var done = 0L
         try {
             for (asset in SttModel.ASSETS) {
                 val target = File(dir, asset.filename)
                 if (target.length() == asset.size) {
+                    File(dir, "${asset.filename}.part").delete() // abandoned resume
                     done += asset.size
                     onProgress(done, total, asset.filename)
                     continue
@@ -93,12 +111,30 @@ class ModelDownloader(private val context: Context) {
                 }
                 done += asset.size
             }
-            pruneOtherModels()
             Result.success(Unit)
         } catch (t: Throwable) {
             Log.e(tag, "download failed", t)
             Result.failure(t)
         }
+    }
+
+    /**
+     * Space available for a large write. Not [File.usableSpace]: the system
+     * will evict other apps' caches to satisfy an allocation, and on a phone
+     * near full that is often the difference between this working and refusing
+     * to start.
+     */
+    private fun allocatableBytes(dir: File): Long = try {
+        val sm = context.getSystemService(StorageManager::class.java)
+        sm.getAllocatableBytes(sm.getUuidForPath(dir))
+    } catch (t: Throwable) {
+        Log.d(tag, "getAllocatableBytes unavailable", t)
+        dir.usableSpace
+    }
+
+    private companion object {
+        // Android starts misbehaving well before a volume is truly full.
+        const val HEADROOM_BYTES = 200_000_000L
     }
 
     private fun fetch(

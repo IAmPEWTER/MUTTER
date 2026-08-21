@@ -34,6 +34,9 @@ class VadSegmenter(
     private var chunkHasSpeech = false
 
     @Synchronized
+    fun isLoaded(): Boolean = vad != null
+
+    @Synchronized
     fun load(): Boolean {
         if (vad != null) return true
         if (!File(modelPath).exists()) {

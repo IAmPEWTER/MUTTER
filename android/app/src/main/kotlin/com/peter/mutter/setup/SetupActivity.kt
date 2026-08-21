@@ -203,6 +203,13 @@ class SetupActivity : AppCompatActivity() {
             withContext(Dispatchers.Main) {
                 if (result.isSuccess) {
                     modelDetail.text = "Download complete."
+                    // The service loads the model once, at connect. Without
+                    // this it would keep running with no engine and a degraded
+                    // VAD until something restarted it.
+                    sendBroadcast(
+                        Intent(MutterAccessibilityService.ACTION_MODEL_READY)
+                            .setPackage(packageName)
+                    )
                 } else {
                     modelDetail.text = "Failed: ${result.exceptionOrNull()?.message}"
                 }

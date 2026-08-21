@@ -53,6 +53,11 @@ class MutterAccessibilityService : AccessibilityService() {
     @Volatile private var hold: Hold? = null
     private var recycleReceiver: BroadcastReceiver? = null
 
+    companion object {
+        /** Sent by SetupActivity when a model download completes. In-package only. */
+        const val ACTION_MODEL_READY = "com.peter.mutter.action.MODEL_READY"
+    }
+
     override fun onCreate() {
         super.onCreate()
         downloader = ModelDownloader(this)
@@ -169,6 +174,10 @@ class MutterAccessibilityService : AccessibilityService() {
             return false
         }
         if (!capturing.compareAndSet(false, true)) return true // swallow stray double-down
+        // Off the input thread on purpose — loading the VAD here would put its
+        // startup back on the very path this hold is trying to keep short. The
+        // hold runs degraded; the next one has it.
+        if (!segmenter.isLoaded()) modelExec.execute { segmenter.load() }
         Log.i(tag, "handleDown accept: editable=${editable != null} imeUp=$imeUp")
 
         // may be null; transcribeAndInject falls back via findPasteTarget
@@ -385,36 +394,39 @@ class MutterAccessibilityService : AccessibilityService() {
         if (recycleReceiver != null) return
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                if (intent?.action == DailyRecycler.ACTION) recycleEngine()
+                when (intent?.action) {
+                    DailyRecycler.ACTION, ACTION_MODEL_READY -> reloadEngine()
+                }
             }
         }
         // RECEIVER_NOT_EXPORTED is mandatory on API 34+; the alarm broadcast is
         // self-targeted (setPackage), so it still reaches us.
+        val filter = IntentFilter(DailyRecycler.ACTION).apply { addAction(ACTION_MODEL_READY) }
         ContextCompat.registerReceiver(
             this,
             receiver,
-            IntentFilter(DailyRecycler.ACTION),
+            filter,
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         recycleReceiver = receiver
     }
 
-    // Daily ~5am: tear down and rebuild the native recognizer to bound heap
-    // growth, then re-warm. Runs on modelExec so it serializes with the initial
+    // Two callers: the ~5am alarm, which rebuilds the native recognizer to
+    // bound heap growth over long uptime, and SetupActivity once a model
+    // download finishes. Runs on modelExec so it serializes with the initial
     // load, and only when not capturing. transcribe/release are synchronized on
-    // the engine, so even a drain racing the recycle is memory-safe — worst
-    // case a queued chunk reloads on demand. Never lost audio.
-    private fun recycleEngine() {
+    // the engine, so even a drain racing this is memory-safe — worst case a
+    // queued chunk reloads on demand. Never lost audio.
+    private fun reloadEngine() {
         modelExec.execute {
             if (capturing.get()) {
-                Log.i(tag, "daily recycle skipped — capturing")
+                Log.i(tag, "reload skipped — capturing")
                 return@execute
             }
             if (!downloader.isPresent()) return@execute
-            Log.i(tag, "daily recycle: release + reload recognizer")
             engine.release()
-            val ok = engine.load()
-            Log.i(tag, "daily recycle reload: $ok")
+            segmenter.release()
+            Log.i(tag, "reload: engine=${engine.load()} vad=${segmenter.load()}")
         }
     }
 

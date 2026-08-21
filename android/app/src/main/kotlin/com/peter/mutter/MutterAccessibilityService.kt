@@ -169,8 +169,7 @@ class MutterAccessibilityService : AccessibilityService() {
         // error (developer.android.com/media/platform/sharing-audio-input), and
         // an accessibility service with no UI on top counts as background — so
         // starting the mic before this silently ate the start of every hold.
-        promoteToForeground()
-        if (!startRecording()) {
+        if (!promoteToForeground() || !startRecording()) {
             demoteForeground()
             capturing.set(false)
             worker.execute { injector.finish(leftover = null) } // undo begin
@@ -330,16 +329,27 @@ class MutterAccessibilityService : AccessibilityService() {
         return null
     }
 
-    private fun promoteToForeground() {
-        try {
-            startForeground(
-                NotificationHelper.NOTIFICATION_ID,
-                NotificationHelper.recordingNotification(this),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-            )
-        } catch (t: Throwable) {
-            Log.e(tag, "startForeground failed", t)
-        }
+    // Load-bearing for capture, not just for the shade: without an active
+    // microphone foreground service Android hands this process silence. The
+    // usual cause of failure is a revoked battery-optimisation exemption, and
+    // the symptom would otherwise be dictation that records nothing at all —
+    // so say so instead of logging it.
+    private fun promoteToForeground(): Boolean = try {
+        startForeground(
+            NotificationHelper.NOTIFICATION_ID,
+            NotificationHelper.recordingNotification(this),
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+        )
+        true
+    } catch (t: Throwable) {
+        Log.e(tag, "startForeground failed — capture would be silenced", t)
+        NotificationHelper.notifyError(
+            this,
+            getString(R.string.notif_mic_blocked_title),
+            getString(R.string.notif_mic_blocked_text),
+            NotificationHelper.MIC_NOTIFICATION_ID,
+        )
+        false
     }
 
     private fun demoteForeground() {

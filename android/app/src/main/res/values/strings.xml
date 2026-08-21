@@ -14,6 +14,8 @@
     <string name="notif_error_channel_name">Dictation problems</string>
     <string name="notif_transcribe_failed_title">Transcription failed — audio saved</string>
     <string name="notif_transcribe_failed_text">Your dictation audio was saved as %1$s. It is not lost.</string>
+    <string name="notif_mic_blocked_title">Microphone blocked — nothing was recorded</string>
+    <string name="notif_mic_blocked_text">Android refused to let MUTTER hold the microphone. Open MUTTER and re-run setup — recording from the background needs the battery-optimisation exemption.</string>
     <string name="notif_inject_failed_title">Couldn\'t insert text — it\'s on your clipboard</string>
 
     <string name="setup_tagline">On-device dictation</string>

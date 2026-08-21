@@ -12,6 +12,7 @@ object NotificationHelper {
     const val NOTIFICATION_ID = 1001
     const val ERROR_CHANNEL_ID = "mutter_errors"
     const val ERROR_NOTIFICATION_ID = 1002
+    const val MIC_NOTIFICATION_ID = 1003
 
     fun ensureChannel(context: Context) {
         val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -50,7 +51,12 @@ object NotificationHelper {
             .build()
 
     /** Never-drop surfacing: a dictation that couldn't be delivered normally. */
-    fun notifyError(context: Context, title: String, text: String) {
+    fun notifyError(
+        context: Context,
+        title: String,
+        text: String,
+        id: Int = ERROR_NOTIFICATION_ID,
+    ) {
         try {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
             val n = Notification.Builder(context, ERROR_CHANNEL_ID)
@@ -60,7 +66,7 @@ object NotificationHelper {
                 .setSmallIcon(R.drawable.ic_mic)
                 .setAutoCancel(true)
                 .build()
-            nm.notify(ERROR_NOTIFICATION_ID, n)
+            nm.notify(id, n)
         } catch (t: Throwable) {
             Log.e("MutterNotif", "notifyError failed", t)
         }

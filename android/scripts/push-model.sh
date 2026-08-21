@@ -24,7 +24,7 @@ def assets(text):
     return rows
 
 # Only the preferred spec is fetchable, so only its block is scanned; a
-# fallback spec's files are never downloaded.
+# fallback spec is only ever loaded, never fetched.
 pref = re.search(r'val PREFERRED\s*=\s*(\w+)', src).group(1)
 block = re.search(r'val %s = Spec\((.*?)\n    \)' % pref, src, re.S).group(1)
 rows = assets(block)

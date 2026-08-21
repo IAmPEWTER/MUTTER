@@ -2,7 +2,6 @@ package com.peter.mutter
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNull
 import kotlin.test.assertSame
 
 class ModelPolicyTest {
@@ -36,20 +35,12 @@ class ModelPolicyTest {
         )
     }
 
+    // The fallback exists so a model swap never darkens the app; the order is
+    // what makes the new model win once it lands.
     @Test
-    fun resolves_the_preferred_model_when_both_are_present() {
-        assertSame(SttModel.PREFERRED, ModelPolicy.resolve(SttModel.KNOWN) { true })
-    }
-
-    @Test
-    fun falls_back_to_the_previous_model_while_the_new_one_downloads() {
-        val resolved = ModelPolicy.resolve(SttModel.KNOWN) { it != SttModel.PREFERRED }
-        assertSame(SttModel.DISTIL_SMALL_EN, resolved)
-    }
-
-    @Test
-    fun reports_nothing_when_the_phone_has_no_model() {
-        assertNull(ModelPolicy.resolve(SttModel.KNOWN) { false })
+    fun the_preferred_model_is_first_and_the_previous_one_is_kept() {
+        assertSame(SttModel.PREFERRED, SttModel.KNOWN.first())
+        assertEquals(true, SttModel.KNOWN.contains(SttModel.DISTIL_SMALL_EN))
     }
 
     // A missing VAD degrades segmentation to RMS; it must not make a model that

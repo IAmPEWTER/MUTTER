@@ -45,7 +45,7 @@ class ModelDownloader(private val context: Context) {
      * quality, not dictation, and [VadSegmenter] already degrades to RMS. A
      * model that can transcribe should never be reported as absent.
      */
-    fun resolve(): SttModel.Spec? = ModelPolicy.resolve(SttModel.KNOWN) { spec ->
+    fun resolve(): SttModel.Spec? = SttModel.KNOWN.firstOrNull { spec ->
         val dir = File(root(), spec.dir)
         spec.recognizerAssets.all { File(dir, it.filename).length() == it.size }
     }
@@ -84,16 +84,18 @@ class ModelDownloader(private val context: Context) {
      * its download finishes; it may never cost dictation.
      */
     fun pruneSupersededModels() {
+        val complete = isPresent()
+        val candidates = supersededDirs()
         val allowed = ModelPolicy.prunable(
-            dirNames = supersededDirs().map { it.name },
+            dirNames = candidates.map { it.name },
             preferredDir = SttModel.PREFERRED.dir,
-            preferredComplete = isPresent(),
+            preferredComplete = complete,
         ).toSet()
         if (allowed.isEmpty()) {
-            Log.i(tag, "nothing safe to prune (${SttModel.PREFERRED.dir} complete: ${isPresent()})")
+            Log.i(tag, "nothing safe to prune (${SttModel.PREFERRED.dir} complete: $complete)")
             return
         }
-        for (dir in supersededDirs().filter { it.name in allowed }) {
+        for (dir in candidates.filter { it.name in allowed }) {
             val freed = dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
             if (dir.deleteRecursively()) {
                 Log.i(tag, "removed superseded model ${dir.name} (${freed / 1_000_000} MB)")

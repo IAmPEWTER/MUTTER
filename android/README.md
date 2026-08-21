@@ -2,11 +2,11 @@
 
 Hold **volume-down** inside any text field on Android → speak → release → text appears at the cursor.
 
-Local Whisper (sherpa-onnx, distil-small.en INT8). CPU only. Clipboard restored within ~200 ms.
+Local speech recognition (sherpa-onnx, NVIDIA parakeet-tdt-0.6b-v2 INT8). CPU only. Clipboard restored within ~200 ms.
 
 ## Get the APK
 
-Prebuilt debug APK (45 MB, anyone with the link can download):
+Prebuilt debug APK (44 MB, anyone with the link can download):
 
 **https://github.com/IAmPEWTER/mutter-releases/releases/latest/download/app-debug.apk**
 
@@ -53,7 +53,7 @@ First-time setup: Settings → tap Check for updates → Install. Android will o
    - Enable accessibility service (Settings → Accessibility → Installed apps → MUTTER → on).
      - You will be asked to confirm key-event filtering. Allow.
    - Allow battery optimization exemption (prevents Android from killing the service).
-   - Download model (~280 MB, one time, cached on device).
+   - Download model (~620 MB, one time, cached on device). Wi-Fi recommended.
    - In-wizard test field: hold volume-down and say something. Release.
 
 ## Daily use
@@ -74,7 +74,7 @@ To disable temporarily: open MUTTER → Settings → toggle *Volume-down interce
 android/
 ├── app/
 │   ├── build.gradle.kts          — AGP 8.7, Kotlin 2.0, compileSdk 35
-│   ├── libs/sherpa-onnx-1.13.2.aar
+│   ├── libs/sherpa-onnx-1.13.6.aar
 │   └── src/main/
 │       ├── AndroidManifest.xml
 │       ├── kotlin/com/peter/mutter/
@@ -82,12 +82,13 @@ android/
 │       │   ├── AudioRecorder.kt                — 16 kHz mono PCM capture
 │       │   ├── VadSegmenter.kt                 — Silero VAD + chunk buffering
 │       │   ├── AdaptiveEndpointer.kt           — pure chunk-cut logic
-│       │   ├── WhisperEngine.kt                — sherpa-onnx OfflineRecognizer wrapper
+│       │   ├── SttModel.kt                     — which model, its files, sizes, hashes
+│       │   ├── SttEngine.kt                    — sherpa-onnx OfflineRecognizer wrapper
 │       │   ├── Sanitizer.kt                    — text cleanup + repeat-loop collapse
 │       │   ├── EnergyGate.kt                   — RMS (degraded-VAD stand-in)
 │       │   ├── PendingAudio.kt                 — failed-chunk WAV persistence
 │       │   ├── TextInjector.kt                 — paste → SET_TEXT splice → clipboard+notif
-│       │   ├── ModelDownloader.kt              — first-launch HF fetch
+│       │   ├── ModelDownloader.kt              — first-launch HF fetch, SHA-256 verified
 │       │   ├── NotificationHelper.kt           — FG + error channels
 │       │   ├── DailyRecycler.kt                — ~5am recognizer recycle
 │       │   ├── Prefs.kt                        — intercept on/off
@@ -97,6 +98,9 @@ android/
 │       └── res/
 │           ├── xml/accessibility_service_config.xml
 │           └── values, layout, drawable, color, font, mipmap-anydpi-v26
+├── scripts/
+│   ├── fetch-libs.sh              — pulls the sherpa-onnx AAR (build does this)
+│   └── push-model.sh              — puts the model on a device so instrumented tests can run
 ├── art/ic_launcher.svg            — icon design source (vector drawable mirrors it)
 └── (gradle wrapper, settings, etc.)
 ```
@@ -112,6 +116,10 @@ cd android/
 ./gradlew :app:assembleDebug          # APK at app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:testDebugUnitTest      # JVM unit tests for the pure-logic units
 ./gradlew :app:lintDebug              # static analysis (warnings only)
+
+# On-device tests need the model present; it is ~620 MB so it is not fetched per run.
+./scripts/push-model.sh               # cache + adb push the model into the app's filesDir
+./gradlew :app:connectedDebugAndroidTest
 ```
 
 The sherpa-onnx Android AAR (~55 MB) is **not** committed to the repo. The first `./gradlew assembleDebug` runs `scripts/fetch-libs.sh` automatically, which downloads it from `k2-fsa/sherpa-onnx` releases into `app/libs/` and SHA-256-verifies. Idempotent — subsequent builds skip the download.
@@ -120,7 +128,8 @@ Debug build is signed automatically with `~/.android/debug.keystore`. Sideloadab
 
 ## Verified
 
-- 35 JVM unit tests pass (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater).
+- 39 JVM unit tests (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater, pending-audio pruning).
+- 4 instrumented tests on an arm64 Android 15 device: the model loads and decodes through sherpa-onnx's JNI, and the capture path delivers windows and survives reuse across holds.
 - Daily driver on Galaxy S23 (One UI): vol-down intercept, paste injection, streaming chunks.
 
 ## Uninstall

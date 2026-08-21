@@ -4,7 +4,7 @@ Android port of MUTTER. Hold **volume-down** while a text field is focused → s
 
 ## Goal
 
-Replace Samsung's on-device STT with local Whisper, system-wide. Press-to-talk via vol-down hardware key. Briefly uses clipboard (saved + restored within ~200 ms) for the universal paste path.
+Replace Samsung's on-device STT with a local model, system-wide. Press-to-talk via vol-down hardware key. Briefly uses clipboard (saved + restored within ~200 ms) for the universal paste path.
 
 ## Non-goals
 
@@ -25,7 +25,7 @@ Gated by `findFocus(FOCUS_INPUT).isEditable()` on key DOWN. False → pass throu
         ▼
   AccessibilityService.onKeyEvent
     ├─ not editable → pass through
-    └─ editable → consume, startForeground(MIC), stream AudioRecord
+    └─ editable → consume, startForeground(MIC), THEN stream AudioRecord
                           │
                           ▼
                512-sample (32 ms) windows
@@ -37,7 +37,7 @@ Gated by `findFocus(FOCUS_INPUT).isEditable()` on key DOWN. False → pass throu
             each cut ─────┤  ← streaming: fires mid-hold
                           ▼
                 sherpa-onnx OfflineRecognizer.decode (per chunk)
-                  + collapseRepeats (bounds whisper repeat-loops)
+                  + collapseRepeats (bounds decoder repeat-loops)
                           │
                           ▼
   set clipboard → ACTION_PASTE → (refused? ACTION_SET_TEXT splice)
@@ -68,45 +68,71 @@ DOWN and matching UP only. Galaxy firmware may flash the volume slider for
 ~50 ms before consumption; cosmetic.
 
 Model load in `onServiceConnected()`:
-1. `OfflineRecognizer` from distil-small.en INT8 in internal storage.
+1. `OfflineRecognizer` from parakeet-tdt-0.6b-v2 INT8 in internal storage.
 2. `VadSegmenter` loads `silero_vad.onnx` from file (`Vad(config=…)`, null AssetManager → `newFromFile`).
-3. Pre-warm recognizer with 0.1 s zero buffer (matches `_MlxBackend.__init__`).
+3. Pre-warm recognizer with 0.1 s zero buffer.
+4. `AudioRecorder.prepare()` opens the HAL input so the first key-down only leaves standby.
 
 `DailyRecycler` arms one inexact ~5 a.m. alarm to `release()`+reload the recognizer when idle — bounds native-heap fragmentation over long uptime while staying hot; re-armed in `onServiceConnected` so it survives reboots without a BOOT receiver.
 
 FG promotion: `startForeground(MICROPHONE)` on DOWN, `stopForeground(REMOVE)` on UP. Notification visible only while recording.
 
-AudioRecord: 16 kHz mono PCM int16, streamed in fixed **512-sample (32 ms) windows** (the Silero VAD window) via an `onWindow` callback. No length cap — a hold runs as long as the user talks; segmentation keeps every chunk under Whisper's 30 s encoder window.
+**Order matters and is not cosmetic.** Android does not error when a background
+app records — it hands back silence
+([docs](https://developer.android.com/media/platform/sharing-audio-input)), and an
+accessibility service with no UI on top is background for this purpose. Starting
+`AudioRecord` before the FGS registers therefore ate the head of every utterance.
+Promotion failure (usually a revoked battery-optimisation exemption) aborts the
+hold and notifies, because the alternative is a dictation that records nothing
+and says nothing. `MutterAudio` logs the head latency and `isClientSilenced()`.
+
+The volume-down path cannot be exercised with `adb shell input` — injected key
+events bypass accessibility key filtering.
+
+AudioRecord: 16 kHz mono PCM int16, streamed in fixed **512-sample (32 ms) windows** (the Silero VAD window) via an `onWindow` callback. No length cap — a hold runs as long as the user talks. Source is `VOICE_RECOGNITION` (no AGC, no call-tuned noise suppressor), falling back to `MIC` if a device refuses it. One instance is reused for the life of the service; `prepare()` opens the input, `start()`/`stop()` bracket each hold.
 
 ### sherpa-onnx
 
-JitPack: `com.github.k2-fsa:sherpa-onnx:v1.13.2`.
+AAR 1.13.6, fetched from k2-fsa GitHub releases by `scripts/fetch-libs.sh` (not JitPack).
 
-Model: `distil-small.en` INT8 from `csukuangfj/sherpa-onnx-whisper-distil-small.en`:
-- encoder.int8.onnx ~103 MB
-- decoder.int8.onnx ~195 MB
-- tokens.txt
-- Total ~298 MB.
+Model: NVIDIA `parakeet-tdt-0.6b-v2` INT8, a NeMo transducer (`modelType = "nemo_transducer"`) — encoder 652 MB, decoder 7 MB, joiner 2 MB, tokens. Identity, sizes and SHA-256s live in `SttModel.kt`.
 
-CPU only. NNAPI falls back for transformer ops, deprecated in Android 15. QNN doesn't fit Whisper's dynamic decoder, and sherpa-onnx ships no Whisper-QNN binary. CPU latency on SD8G2: ~150–300 ms per 5 s clip.
+Measured on 250 LibriSpeech test-clean utterances cut to 3–8 s (one sentence at a time, as used), decode and PSS on an arm64 Android 15 device:
+
+| model | WER | clean sentences | decode (7.4 s clip) | peak PSS |
+|---|---|---|---|---|
+| whisper distil-small.en int8 (until v0.6.0) | 4.06% | 67.6% | 612 ms | 657 MB |
+| moonshine-base-en int8 | 3.28% | 71.2% | — | — |
+| parakeet-tdt-110m int8 | 2.39% | 74.8% | 82 ms | 331 MB |
+| **parakeet-tdt-0.6b-v2 int8** | **1.64%** | **83.2%** | **186 ms** | **819 MB** |
+
+A transducer has no fixed encoder window, so a 4 s chunk costs 4 s of work — Whisper padded every chunk to 30 s, which is most of the speed difference.
+
+CPU only. NNAPI is deprecated in Android 15 and falls back for these ops anyway; sherpa-onnx's QNN (Hexagon NPU) support ships no Android AAR — only Rockchip — and its QNN models are Moonshine and a streaming Nemotron, so the Snapdragon NPU is not reachable from here.
+
+parakeet-tdt-110m is the fallback if 819 MB resident ever becomes a problem: still better than distil-small.en on every axis at 331 MB. Its int8 files are not on HuggingFace (the canonical repo is empty), so it would need the GitHub tarball or a hash-verified mirror.
 
 ### Segmentation (`VadSegmenter` + `AdaptiveEndpointer`)
 
-Whisper's encoder is a hard 30 s window with no long-form chunking, so long holds must be split. Each 512-sample window is scored by Silero VAD (`Vad.compute()` ≥ 0.5 = speech); a pure, unit-tested endpointer decides cuts:
+Cuts exist for streaming — each one transcribes immediately, so text appears mid-hold. They were also a hard requirement under Whisper's fixed 30 s encoder window; the transducer removed that, and the ceiling now just bounds per-chunk latency. Each 512-sample window is scored by Silero VAD (`Vad.compute()` ≥ 0.5 = speech); a pure, unit-tested endpointer decides cuts:
 
-- No cut until **4 s of speech** in the chunk (avoids fragments, gives Whisper context).
+- No cut until **4 s of speech** in the chunk (avoids fragments).
 - Then cut on a silence gap ≥ a threshold that **ramps with total chunk length**: 500 ms (< 7 s) → 300 ms (< 15 s) → 200 ms floor.
-- **Emergency cut at 25 s** of total chunk duration, unconditional — guarantees every chunk < Whisper's 30 s window even with zero pauses.
+- **Emergency cut at 25 s** of total chunk duration, unconditional — bounds chunk latency even with zero pauses.
 - Counters reset after each cut; the next chunk re-earns the 4 s gate.
 
-Buffering is ours (`compute()` never queues audio), so memory stays flat. If the VAD model is missing or a window is the wrong size, every window counts as speech and the 25 s emergency cut still bounds length — degraded, never a failure. `silero_vad.onnx` (643854 B) is fetched by `ModelDownloader` alongside the recognizer.
+Buffering is ours (`compute()` never queues audio), so memory stays flat. If the VAD model is missing or a window is the wrong size, per-window RMS stands in and the 25 s emergency cut still bounds length — degraded, never a failure. `silero_vad.onnx` (643854 B) is fetched by `ModelDownloader` alongside the recognizer.
 
 ### Model download (first launch)
 
-1. Check `getFilesDir()/models/distil-small.en/`.
-2. If missing, download `.tar.bz2` from sherpa-onnx GitHub releases (~150 MB compressed).
-3. Extract.
-4. SHA-256 verify against baked-in hash.
+1. Check `getFilesDir()/models/<SttModel.DIR>/` — names and sizes only, so service connect stays fast.
+2. If missing, fetch each file listed in `SttModel.ASSETS`, resuming via `Range`.
+3. SHA-256 verify against the canonical k2-fsa release before putting it in place. A `200` answer to a `Range` request is never appended — that produced a size-correct, corrupt model.
+4. Delete model directories that are no longer active.
+
+Files come from the author's HuggingFace copy because GitHub ships one `.tar.bz2` and Android has no bzip2 decoder. The hash check is what makes that indirection safe.
+
+Missing model → tappable notification on service connect. Silence there meant an update that changed models looked like dictation simply breaking.
 
 ### Transcript hygiene (no blacklist)
 
@@ -118,9 +144,10 @@ Degraded mode (VAD model missing): per-window RMS stands in for Silero, so a
 silent hold still emits no chunks.
 
 Never-drop: engine load/decode failure persists the chunk to
-`filesDir/pending/*.wav` (`PendingAudio`) + notification. `WhisperEngine`
+`filesDir/pending/*.wav` (`PendingAudio`) + notification. `SttEngine`
 serializes transcribe/release on its monitor so the daily recycle or unbind
-can't free the native recognizer mid-decode.
+can't free the native recognizer mid-decode. `pending/` is pruned to the
+newest 20 / 14 days on every save — it used to grow without bound.
 
 ### Text injection
 
@@ -133,7 +160,7 @@ restored over it — that used to destroy the transcript) + a notification
 shows it. If a new hold begins inside the 200 ms restore window, begin()
 adopts the pending payload and cancels the late write.
 
-Sanitize (port from `mutter/daemon.py`):
+Sanitize:
 - `\n`, `\r` → space
 - Runs of spaces collapsed
 - Trim

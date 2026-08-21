@@ -39,15 +39,16 @@ object ModelBootstrap {
         if (!running.compareAndSet(false, true)) return
         val app = context.applicationContext
         Thread({
-            try {
-                fetch(app, downloader)
-            } finally {
-                running.set(false)
-            }
+            // The retry is armed only after `running` clears. Arming it inside
+            // fetch() meant a network that appeared while the fetch was still
+            // failing hit the `running` guard and the retry was dropped.
+            val retry = try { fetch(app, downloader) } finally { running.set(false) }
+            if (retry) awaitUnmetered(app, downloader)
         }, "MutterModelFetch").apply { isDaemon = true }.start()
     }
 
-    private fun fetch(context: Context, downloader: ModelDownloader) {
+    /** Returns true if this should be retried when Wi-Fi next appears. */
+    private fun fetch(context: Context, downloader: ModelDownloader): Boolean {
         // A phone that still has the previous model keeps dictating while this
         // runs, so only a phone with nothing gets an attention-grabbing prompt.
         val dark = !downloader.hasAnyModel()
@@ -62,8 +63,7 @@ object ModelBootstrap {
                     openSetup = true,
                 )
             }
-            awaitUnmetered(context, downloader)
-            return
+            return true
         }
         val title = context.getString(R.string.notif_model_fetching_title)
         NotificationHelper.notifyProgress(context, title, "", 0)
@@ -90,6 +90,7 @@ object ModelBootstrap {
                 Intent(MutterAccessibilityService.ACTION_MODEL_READY)
                     .setPackage(context.packageName)
             )
+            return false
         } else {
             val why = result.exceptionOrNull()?.message ?: "unknown error"
             Log.e(TAG, "fetch failed: $why")
@@ -102,7 +103,7 @@ object ModelBootstrap {
             )
             // Offline mid-download is the common case and resumes from the
             // .part file, so treat a failure as "try again on the next Wi-Fi".
-            awaitUnmetered(context, downloader)
+            return true
         }
     }
 

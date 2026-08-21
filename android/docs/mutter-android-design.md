@@ -68,7 +68,7 @@ DOWN and matching UP only. Galaxy firmware may flash the volume slider for
 ~50 ms before consumption; cosmetic.
 
 Model load in `onServiceConnected()`:
-1. `OfflineRecognizer` from parakeet-tdt-0.6b-v2 INT8 in internal storage.
+1. `OfflineRecognizer` from whichever model `ModelDownloader.resolve()` finds — `SttModel.KNOWN`, preferred first. The list exists so an update that changes models never costs dictation while the new one downloads.
 2. `VadSegmenter` loads `silero_vad.onnx` from file (`Vad(config=…)`, null AssetManager → `newFromFile`).
 3. Pre-warm recognizer with 0.1 s zero buffer.
 4. `AudioRecorder.prepare()` opens the HAL input so the first key-down only leaves standby.
@@ -82,14 +82,17 @@ app records — it hands back silence
 ([docs](https://developer.android.com/media/platform/sharing-audio-input)), and an
 accessibility service with no UI on top is background for this purpose. Starting
 `AudioRecord` before the FGS registers therefore ate the head of every utterance.
-Promotion failure (usually a revoked battery-optimisation exemption) aborts the
-hold and notifies, because the alternative is a dictation that records nothing
-and says nothing. `MutterAudio` logs the head latency and `isClientSilenced()`.
+Promotion failure (usually a revoked battery-optimisation exemption) is logged
+and capture proceeds anyway — on many devices it still works, and making the
+failure fatal turned one bad phone state into "every press just buzzes".
+`MutterAudio` logs the head latency, and the blocked-microphone notification
+hangs off `isClientSilenced()`, which fires only when the framework confirms it
+is feeding us zeros.
 
 The volume-down path cannot be exercised with `adb shell input` — injected key
 events bypass accessibility key filtering.
 
-AudioRecord: 16 kHz mono PCM int16, streamed in fixed **512-sample (32 ms) windows** (the Silero VAD window) via an `onWindow` callback. No length cap — a hold runs as long as the user talks. Source is `VOICE_RECOGNITION` (no AGC, no call-tuned noise suppressor), falling back to `MIC` if a device refuses it. One instance is reused for the life of the service; `prepare()` opens the input, `start()`/`stop()` bracket each hold.
+AudioRecord: 16 kHz mono PCM int16, streamed in fixed **512-sample (32 ms) windows** (the Silero VAD window) via an `onWindow` callback. No length cap — a hold runs as long as the user talks. Source is `VOICE_RECOGNITION` (no AGC, no call-tuned noise suppressor), falling back to `MIC` if a device refuses it. One instance is reused for the life of the service; `prepare()` opens the input, `start()`/`stop()` bracket each hold. `start()` retries once with a fresh track — a held-open input can be invalidated while idle (a call, another app) and it surfaces nowhere but `startRecording()`.
 
 ### sherpa-onnx
 
@@ -125,14 +128,14 @@ Buffering is ours (`compute()` never queues audio), so memory stays flat. If the
 
 ### Model download (first launch)
 
-1. Check `getFilesDir()/models/<SttModel.DIR>/` — names and sizes only, so service connect stays fast.
-2. If missing, fetch each file listed in `SttModel.ASSETS`, resuming via `Range`.
+1. Check `getFilesDir()/models/<spec.dir>/` — names and sizes only, so service connect stays fast. The VAD is excluded from the check: without it segmentation degrades to RMS, which must not make a model that still transcribes look absent.
+2. If the preferred model is missing, `ModelBootstrap` fetches it on an unmetered network, resuming via `Range`, with progress in the shade. Metered → notify and wait on a `NetworkCallback`.
 3. SHA-256 verify against the canonical k2-fsa release before putting it in place. A `200` answer to a `Range` request is never appended — that produced a size-correct, corrupt model.
-4. Delete model directories that are no longer active.
+4. **Only then** delete superseded model directories. `ModelPolicy.prunable` returns nothing until the preferred model is complete; v0.7.0 pruned on connect and every install lost its only model.
 
 Files come from the author's HuggingFace copy because GitHub ships one `.tar.bz2` and Android has no bzip2 decoder. The hash check is what makes that indirection safe.
 
-Missing model → tappable notification on service connect. Silence there meant an update that changed models looked like dictation simply breaking.
+A model that will not fit is reported with the numbers — never resolved by deleting the working one. Wizard and bootstrap share a `Mutex`: two writers on one `.part` make a size-correct, corrupt file.
 
 ### Transcript hygiene (no blacklist)
 

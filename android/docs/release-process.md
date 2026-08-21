@@ -52,9 +52,11 @@ gh release create "v$VN" --repo IAmPEWTER/mutter-releases \
 
 Phone picks it up at next app launch (or via Settings → Check for updates).
 
-**If the release changes `SttModel.DIR`** the new build has no model until the user
-downloads it: the service posts a tappable notification on connect, and the old
-model directory is deleted once the new one lands. Say so in the release notes.
+**If the release changes `SttModel.PREFERRED`** the app handles it: it keeps
+dictating on the model already installed, fetches the new one on Wi-Fi by itself,
+and deletes the old directory only once the new one verifies. Add the previous
+spec to `SttModel.KNOWN` (assets without hashes — load-only) so the fallback
+exists, and mention the download size in the release notes.
 
 ## Schema
 

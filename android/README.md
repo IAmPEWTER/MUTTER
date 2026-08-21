@@ -53,7 +53,8 @@ First-time setup: Settings → tap Check for updates → Install. Android will o
    - Enable accessibility service (Settings → Accessibility → Installed apps → MUTTER → on).
      - You will be asked to confirm key-event filtering. Allow.
    - Allow battery optimization exemption (prevents Android from killing the service).
-   - Download model (~620 MB, one time, cached on device). Wi-Fi recommended.
+   - The speech model (~620 MB, one time) downloads itself on Wi-Fi — the wizard
+     shows progress, and the app fetches it in the background either way.
    - In-wizard test field: hold volume-down and say something. Release.
 
 ## Daily use
@@ -82,13 +83,15 @@ android/
 │       │   ├── AudioRecorder.kt                — 16 kHz mono PCM capture
 │       │   ├── VadSegmenter.kt                 — Silero VAD + chunk buffering
 │       │   ├── AdaptiveEndpointer.kt           — pure chunk-cut logic
-│       │   ├── SttModel.kt                     — which model, its files, sizes, hashes
+│       │   ├── SttModel.kt                     — known models, files, sizes, hashes
+│       │   ├── ModelPolicy.kt                   — pure: what may be pruned, which model loads
+│       │   ├── ModelBootstrap.kt                — unattended model fetch on Wi-Fi
 │       │   ├── SttEngine.kt                    — sherpa-onnx OfflineRecognizer wrapper
 │       │   ├── Sanitizer.kt                    — text cleanup + repeat-loop collapse
 │       │   ├── EnergyGate.kt                   — RMS (degraded-VAD stand-in)
 │       │   ├── PendingAudio.kt                 — failed-chunk WAV persistence
 │       │   ├── TextInjector.kt                 — paste → SET_TEXT splice → clipboard+notif
-│       │   ├── ModelDownloader.kt              — first-launch HF fetch, SHA-256 verified
+│       │   ├── ModelDownloader.kt              — HF fetch, SHA-256 verified, prune-after-verify
 │       │   ├── NotificationHelper.kt           — FG + error channels
 │       │   ├── DailyRecycler.kt                — ~5am recognizer recycle
 │       │   ├── Prefs.kt                        — intercept on/off
@@ -141,8 +144,9 @@ Debug build is signed automatically with `~/.android/debug.keystore`. Sideloadab
 
 ## Verified
 
-- 39 JVM unit tests (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater, pending-audio pruning).
-- 4 instrumented tests on an arm64 Android 15 device: the model loads and decodes through sherpa-onnx's JNI, and the capture path delivers windows and survives reuse across holds.
+- 47 JVM unit tests (endpointer, sanitizer + repeat-collapse, RMS, recycler, updater, pending-audio pruning, model-lifecycle policy).
+- 7 instrumented tests on an arm64 Android 15 device: the model loads and decodes through sherpa-onnx's JNI, the real download verifies every asset, a superseded model survives until its replacement lands, and the capture path delivers windows and survives reuse across holds.
+- v0.7.0 → v0.8.0 upgrade on-device: v0.7.0 deleted the installed model on connect; v0.8.0 kept it, fetched the replacement unattended in 69 s, and reloaded engine + VAD without a restart.
 - Daily driver on Galaxy S23 (One UI): vol-down intercept, paste injection, streaming chunks.
 
 ## Uninstall

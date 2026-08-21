@@ -9,6 +9,7 @@ import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.RandomAccessFile
 
 /**
  * Exercises the real download against the real URLs — the part most likely to
@@ -76,6 +77,37 @@ class ModelDownloaderInstrumentedTest {
         } finally {
             if (restore) File(downloader.modelDir(), "held.tmp").renameTo(encoder)
         }
+    }
+
+    /**
+     * The VAD ships inside each model's directory. Resolving its path once at
+     * construction meant a phone running on a fallback model kept pointing into
+     * a directory that pruning later deletes, and reloaded into degraded mode.
+     */
+    @Test
+    fun the_vad_path_follows_whichever_model_is_current() {
+        assumeTrue("run scripts/push-model.sh first", downloader.isPresent())
+        val encoder = File(downloader.modelDir(), SttModel.ENCODER)
+        val restore = encoder.exists()
+        if (restore) assertTrue(encoder.renameTo(File(downloader.modelDir(), "held.tmp")))
+        val previous = File(context.filesDir, "models/${SttModel.DISTIL_SMALL_EN.dir}")
+            .apply { mkdirs() }
+        try {
+            for (a in SttModel.DISTIL_SMALL_EN.recognizerAssets) {
+                RandomAccessFile(File(previous, a.filename), "rw").use { it.setLength(a.size) }
+            }
+            assertEquals(SttModel.DISTIL_SMALL_EN, downloader.resolve())
+            assertTrue(
+                "VAD should resolve inside the model actually in use",
+                downloader.vadModelPath().contains(SttModel.DISTIL_SMALL_EN.dir),
+            )
+        } finally {
+            previous.deleteRecursively()
+            if (restore) File(downloader.modelDir(), "held.tmp").renameTo(encoder)
+        }
+        // Preferred model whole again -> the path must move with it.
+        assertEquals(SttModel.PREFERRED, downloader.resolve())
+        assertTrue(downloader.vadModelPath().contains(SttModel.PREFERRED.dir))
     }
 
     private fun encoderSize() = SttModel.ASSETS.first { it.filename == SttModel.ENCODER }.size

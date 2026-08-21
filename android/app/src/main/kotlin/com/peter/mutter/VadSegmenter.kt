@@ -21,7 +21,13 @@ import java.io.File
  * endpointer's 25s emergency cut bounds chunk length in every mode.
  */
 class VadSegmenter(
-    private val modelPath: String,
+    /**
+     * Resolved per [load], not once at construction: the VAD ships inside each
+     * model's directory, so a phone running on a fallback model would otherwise
+     * keep pointing at a path that pruning deletes once the preferred model
+     * lands, and reload silently into degraded mode.
+     */
+    private val modelPath: () -> String,
     private val onChunk: (FloatArray) -> Unit,
     private val sampleRate: Int = 16_000,
     private val windowSize: Int = 512,
@@ -39,14 +45,15 @@ class VadSegmenter(
     @Synchronized
     fun load(): Boolean {
         if (vad != null) return true
-        if (!File(modelPath).exists()) {
-            Log.e(tag, "vad model missing at $modelPath")
+        val path = modelPath()
+        if (!File(path).exists()) {
+            Log.e(tag, "vad model missing at $path")
             return false
         }
         return try {
             val cfg = VadModelConfig(
                 sileroVadModelConfig = SileroVadModelConfig(
-                    model = modelPath,
+                    model = path,
                     threshold = threshold,
                     minSilenceDuration = 0.1f, // unused: endpointing is ours, not sherpa's
                     minSpeechDuration = 0.1f,

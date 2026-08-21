@@ -68,7 +68,7 @@ class MutterAccessibilityService : AccessibilityService() {
         // Each completed chunk is queued to the single-thread worker, so chunks
         // transcribe and inject strictly in spoken order while capture continues.
         segmenter = VadSegmenter(
-            modelPath = downloader.vadModelPath(),
+            modelPath = { downloader.vadModelPath() },
             onChunk = { chunk ->
                 val h = hold
                 worker.execute { transcribeAndInject(h, chunk) }
@@ -366,16 +366,16 @@ class MutterAccessibilityService : AccessibilityService() {
      * works regardless. The hold proceeds either way; [notifyMicBlocked] fires
      * only if the framework confirms it is actually feeding us zeros.
      */
-    private fun promoteToForeground(): Boolean = try {
-        startForeground(
-            NotificationHelper.NOTIFICATION_ID,
-            NotificationHelper.recordingNotification(this),
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-        )
-        true
-    } catch (t: Throwable) {
-        Log.e(tag, "startForeground refused — recording anyway", t)
-        false
+    private fun promoteToForeground() {
+        try {
+            startForeground(
+                NotificationHelper.NOTIFICATION_ID,
+                NotificationHelper.recordingNotification(this),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+            )
+        } catch (t: Throwable) {
+            Log.e(tag, "startForeground refused — recording anyway", t)
+        }
     }
 
     private fun notifyMicBlocked() = NotificationHelper.notifyError(

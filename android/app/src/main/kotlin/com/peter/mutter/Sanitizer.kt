@@ -15,12 +15,13 @@ object Sanitizer {
      * (1..[maxPeriod] words, compared case-/punctuation-insensitively) down to
      * a single instance, repeating until stable.
      *
-     * Whisper's decoder can lock into a loop on noisy or marginal audio and
-     * emit the same phrase hundreds of times ("Thank you. Thank you. ...").
-     * VAD gating keeps silence away from the engine; this bounds the damage
-     * when real-but-noisy audio still loops: the worst case types one phrase,
-     * never a spew. Real dictation is untouched — nobody says the same phrase
-     * four times running; if they truly do, one instance still types.
+     * An autoregressive decoder can lock into a loop on noisy or marginal
+     * audio and emit the same phrase hundreds of times ("Thank you. Thank
+     * you. ..."). That was Whisper's pathology; a transducer emits per frame
+     * and is far less prone to it, but the guard is cheap and the failure it
+     * prevents is ugly, so it stays. Real dictation is untouched — nobody
+     * says the same phrase four times running; if they truly do, one instance
+     * still types.
      */
     fun collapseRepeats(text: String, minRepeats: Int = 4, maxPeriod: Int = 8): String {
         var current = text

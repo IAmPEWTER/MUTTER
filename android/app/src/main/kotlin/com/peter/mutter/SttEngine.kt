@@ -4,47 +4,53 @@ import android.util.Log
 import com.k2fsa.sherpa.onnx.OfflineModelConfig
 import com.k2fsa.sherpa.onnx.OfflineRecognizer
 import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
-import com.k2fsa.sherpa.onnx.OfflineWhisperModelConfig
+import com.k2fsa.sherpa.onnx.OfflineTransducerModelConfig
 import java.io.File
 
-class WhisperEngine(private val modelDir: File) {
+/**
+ * sherpa-onnx offline recognizer over the model named by [SttModel].
+ *
+ * A transducer, not an encoder-decoder: it consumes exactly the audio it is
+ * given. Whisper's encoder is a fixed 30 s window, so a 4 s chunk cost the same
+ * as a 30 s one, and its decoder could lock into a repeat loop on marginal
+ * audio. Neither applies here.
+ */
+class SttEngine(private val modelDir: File) {
 
-    private val tag = "MutterWhisper"
+    private val tag = "MutterStt"
     private var recognizer: OfflineRecognizer? = null
 
     @Synchronized
     fun load(): Boolean {
         if (recognizer != null) return true
-        val encoder = File(modelDir, ENCODER).absolutePath
-        val decoder = File(modelDir, DECODER).absolutePath
-        val tokens = File(modelDir, TOKENS).absolutePath
-        if (!File(encoder).exists() || !File(decoder).exists() || !File(tokens).exists()) {
-            Log.e(tag, "model files missing under ${modelDir.absolutePath}")
+        val encoder = File(modelDir, SttModel.ENCODER)
+        val decoder = File(modelDir, SttModel.DECODER)
+        val joiner = File(modelDir, SttModel.JOINER)
+        val tokens = File(modelDir, SttModel.TOKENS)
+        val missing = listOf(encoder, decoder, joiner, tokens).filterNot { it.exists() }
+        if (missing.isNotEmpty()) {
+            Log.e(tag, "model files missing: ${missing.joinToString { it.name }}")
             return false
         }
         return try {
-            val whisper = OfflineWhisperModelConfig(
-                encoder = encoder,
-                decoder = decoder,
-                language = "en",
-                task = "transcribe",
-            )
             val modelCfg = OfflineModelConfig(
-                whisper = whisper,
-                tokens = tokens,
-                numThreads = 4,
+                transducer = OfflineTransducerModelConfig(
+                    encoder = encoder.absolutePath,
+                    decoder = decoder.absolutePath,
+                    joiner = joiner.absolutePath,
+                ),
+                tokens = tokens.absolutePath,
+                numThreads = SttModel.NUM_THREADS,
                 debug = false,
-                modelType = "whisper",
+                modelType = SttModel.MODEL_TYPE,
             )
-            val cfg = OfflineRecognizerConfig(
-                modelConfig = modelCfg,
-                decodingMethod = "greedy_search",
+            recognizer = OfflineRecognizer(
+                null,
+                OfflineRecognizerConfig(modelConfig = modelCfg, decodingMethod = "greedy_search"),
             )
-            recognizer = OfflineRecognizer(null, cfg)
-            // Pre-warm with a small zero buffer so first real transcribe is hot.
+            // Pre-warm so the first real transcribe is hot.
             try {
-                val warmup = FloatArray(1600) // 0.1 s @ 16 kHz
-                transcribe(warmup, 16000)
+                transcribe(FloatArray(1600), 16000) // 0.1 s @ 16 kHz
             } catch (t: Throwable) {
                 Log.d(tag, "warmup failed (non-fatal)", t)
             }
@@ -88,11 +94,5 @@ class WhisperEngine(private val modelDir: File) {
         } finally {
             try { stream.release() } catch (_: Throwable) {}
         }
-    }
-
-    companion object {
-        const val ENCODER = "encoder.int8.onnx"
-        const val DECODER = "decoder.int8.onnx"
-        const val TOKENS = "tokens.txt"
     }
 }

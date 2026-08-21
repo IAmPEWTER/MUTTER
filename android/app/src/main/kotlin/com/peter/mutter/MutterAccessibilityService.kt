@@ -31,7 +31,7 @@ class MutterAccessibilityService : AccessibilityService() {
     private val capturing = AtomicBoolean(false)
 
     private val recorder = AudioRecorder()
-    private lateinit var engine: WhisperEngine
+    private lateinit var engine: SttEngine
     private lateinit var segmenter: VadSegmenter
     private lateinit var downloader: ModelDownloader
     private lateinit var injector: TextInjector
@@ -56,7 +56,7 @@ class MutterAccessibilityService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         downloader = ModelDownloader(this)
-        engine = WhisperEngine(downloader.modelDir())
+        engine = SttEngine(downloader.modelDir())
         // Each completed chunk is queued to the single-thread worker, so chunks
         // transcribe and inject strictly in spoken order while capture continues.
         segmenter = VadSegmenter(
@@ -98,6 +98,7 @@ class MutterAccessibilityService : AccessibilityService() {
         // standby instead of paying the whole mic open.
         modelExec.execute { recorder.prepare() }
         worker.execute { PendingAudio.prune(this) }
+        modelExec.execute { downloader.pruneOtherModels() }
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
